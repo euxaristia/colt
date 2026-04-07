@@ -52,7 +52,11 @@ class Editor
       m.append(filename)
       m.append("\" ")
       m.append(_buf.line_count().string())
-      m.append(" lines")
+      if _buf.line_count() == 1 then
+        m.append(" line")
+      else
+        m.append(" lines")
+      end
       _message = m.clone()
       _msg_time = _now_seconds()
       _msg_transient = true
@@ -500,7 +504,11 @@ class Editor
         _yank_is_line = true
         let dmsg = String
         dmsg.append(count.string())
-        dmsg.append(" lines deleted")
+        if count == 1 then
+          dmsg.append(" line deleted")
+        else
+          dmsg.append(" lines deleted")
+        end
         _set_message(dmsg.clone())
         return
       end
@@ -522,7 +530,11 @@ class Editor
         _yank_is_line = true
         let ymsg = String
         ymsg.append(count.string())
-        ymsg.append(" lines yanked")
+        if count == 1 then
+          ymsg.append(" line yanked")
+        else
+          ymsg.append(" lines yanked")
+        end
         _set_message(ymsg.clone())
         return
       end
@@ -860,7 +872,11 @@ class Editor
       msg.append(fname)
       msg.append("\" ")
       msg.append(_buf.line_count().string())
-      msg.append(" lines")
+      if _buf.line_count() == 1 then
+        msg.append(" line")
+      else
+        msg.append(" lines")
+      end
       _set_message(msg.clone())
     else
       // Try to parse as line number
@@ -890,7 +906,11 @@ class Editor
       sm.append(_buf.filename)
       sm.append("\" ")
       sm.append(_buf.line_count().string())
-      sm.append(" lines written")
+      if _buf.line_count() == 1 then
+        sm.append(" line written")
+      else
+        sm.append(" lines written")
+      end
       _set_message(sm.clone())
       true
     else
