@@ -1,5 +1,6 @@
 use "term"
 use "files"
+use "time"
 
 use @write[ISize](fd: I32, buffer: Pointer[U8] tag, size: USize) if posix
 
@@ -27,6 +28,7 @@ class Editor
   var _search_dir: Bool = true  // true = forward
   var _message: String = ""
   var _msg_time: U64 = 0
+  var _msg_transient: Bool = false  // true = auto-clear after 5s
   var _yank_lines: Array[String] ref = Array[String]
   var _yank_is_line: Bool = false
   var _count: USize = 0
@@ -51,6 +53,8 @@ class Editor
       m.append(_buf.line_count().string())
       m.append(" lines")
       _message = m.clone()
+      _msg_time = _now_seconds()
+      _msg_transient = true
     else
       _message = ""
     end
@@ -132,6 +136,9 @@ class Editor
 
   // --- Helpers ---
 
+  fun _now_seconds(): U64 =>
+    (Time.nanos() / 1_000_000_000).u64()
+
   fun _cur_line_len(): USize =>
     _buf.line_len(_cy)
 
@@ -152,8 +159,10 @@ class Editor
       _cx = max_x
     end
 
-  fun ref _set_message(msg: String) =>
+  fun ref _set_message(msg: String, transient: Bool = false) =>
     _message = msg
+    _msg_time = _now_seconds()
+    _msg_transient = transient
 
   // --- Movement ---
 
@@ -388,7 +397,7 @@ class Editor
           _cy = row
           _cx = idx.usize()
           _clamp_cursor()
-          if wrapped then _set_message("Search wrapped") end
+          if wrapped then _set_message("Search wrapped", false) end
           return
         end
         row = row + 1
@@ -416,7 +425,7 @@ class Editor
           _cy = row
           _cx = found.usize()
           _clamp_cursor()
-          if wrapped then _set_message("Search wrapped") end
+          if wrapped then _set_message("Search wrapped", false) end
           return
         end
         if row == 0 then
@@ -980,6 +989,14 @@ class Editor
   // --- Rendering ---
 
   fun ref render() =>
+    // Clear expired transient messages (5 second timeout)
+    if _msg_transient and (_message.size() > 0) then
+      if (_now_seconds() - _msg_time) >= 5 then
+        _message = ""
+        _msg_transient = false
+      end
+    end
+
     _scroll()
     let out = String((_rows + 2) * _cols * 2)
     out.append("\x1B[?25l")  // hide cursor

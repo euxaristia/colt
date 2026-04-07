@@ -1,9 +1,11 @@
 use "term"
 use "files"
+use "time"
 
 use @tcgetattr[I32](fd: I32, termios: Pointer[U8] tag) if posix
 use @tcsetattr[I32](fd: I32, action: I32, termios: Pointer[U8] tag) if posix
 use @cfmakeraw[None](termios: Pointer[U8] tag) if posix
+use @exit[None](status: I32) if posix
 
 actor Main
   let _env: Env
@@ -28,10 +30,10 @@ actor Main
     let filename: String val = try env.args(1)? else "" end
 
     let main_tag: Main tag = this
-    let quit_fn: {()} val = {() => main_tag.quit() }
 
+    let editor = TimerRender(env, filename, main_tag)
     let term = ANSITerm(
-      recover iso EditorNotify(env, filename, quit_fn) end,
+      recover iso EditorNotify(editor) end,
       env.input)
     _term = term
 
@@ -48,64 +50,135 @@ actor Main
       end,
       32)
 
+    // Start the periodic timer
+    editor.start_timer()
+
   be quit() =>
     ifdef posix then
       @tcsetattr(0, 0, _orig_termios.cpointer())
     end
-    // Clear screen and move cursor home
     _env.out.write("\x1B[2J\x1B[H")
     _term.dispose()
-    _env.exitcode(0)
+    ifdef posix then
+      @exit(0)
+    end
 
 
-class EditorNotify is ANSINotify
+actor TimerRender
   let _editor: Editor
+  let _main: Main tag
 
-  new iso create(env: Env, filename: String, quit_fn: {()} val) =>
-    _editor = Editor(env, filename, quit_fn)
+  new create(env: Env, filename: String, main: Main tag) =>
+    let self_tag: TimerRender tag = this
+    _editor = Editor(env, filename, {() => self_tag.quit() })
+    _main = main
 
-  fun ref apply(term: ANSITerm ref, input: U8) =>
-    _editor.key_press(input)
+  be start_timer() =>
+    let t: Timer iso = Timer(recover iso RenderTimerNotify(this) end, 1_000_000_000, 1_000_000_000)
+    let timers = Timers
+    timers(consume t)
+
+  be render_only() =>
     _editor.render()
 
-  fun ref up(ctrl: Bool, alt: Bool, shift: Bool) =>
+  be quit() =>
+    _main.quit()
+
+  be key_press(ch: U8) =>
+    _editor.key_press(ch)
+    _editor.render()
+
+  be arrow_up() =>
     _editor.arrow_up()
     _editor.render()
 
-  fun ref down(ctrl: Bool, alt: Bool, shift: Bool) =>
+  be arrow_down() =>
     _editor.arrow_down()
     _editor.render()
 
-  fun ref left(ctrl: Bool, alt: Bool, shift: Bool) =>
+  be arrow_left() =>
     _editor.arrow_left()
     _editor.render()
 
-  fun ref right(ctrl: Bool, alt: Bool, shift: Bool) =>
+  be arrow_right() =>
     _editor.arrow_right()
     _editor.render()
 
-  fun ref delete(ctrl: Bool, alt: Bool, shift: Bool) =>
+  be delete_key() =>
     _editor.delete_key()
     _editor.render()
 
-  fun ref home(ctrl: Bool, alt: Bool, shift: Bool) =>
+  be home_key() =>
     _editor.home_key()
     _editor.render()
 
-  fun ref end_key(ctrl: Bool, alt: Bool, shift: Bool) =>
+  be end_key() =>
     _editor.end_key()
     _editor.render()
 
-  fun ref page_up(ctrl: Bool, alt: Bool, shift: Bool) =>
+  be page_up() =>
     _editor.page_up()
     _editor.render()
 
-  fun ref page_down(ctrl: Bool, alt: Bool, shift: Bool) =>
+  be page_down() =>
     _editor.page_down()
     _editor.render()
+
+  be set_size(rows: USize, cols: USize) =>
+    _editor.set_size(rows, cols)
+
+
+class EditorNotify is ANSINotify
+  let _editor: TimerRender tag
+
+  new iso create(editor: TimerRender tag) =>
+    _editor = editor
+
+  fun ref apply(term: ANSITerm ref, input: U8) =>
+    _editor.key_press(input)
+
+  fun ref up(ctrl: Bool, alt: Bool, shift: Bool) =>
+    _editor.arrow_up()
+
+  fun ref down(ctrl: Bool, alt: Bool, shift: Bool) =>
+    _editor.arrow_down()
+
+  fun ref left(ctrl: Bool, alt: Bool, shift: Bool) =>
+    _editor.arrow_left()
+
+  fun ref right(ctrl: Bool, alt: Bool, shift: Bool) =>
+    _editor.arrow_right()
+
+  fun ref delete(ctrl: Bool, alt: Bool, shift: Bool) =>
+    _editor.delete_key()
+
+  fun ref home(ctrl: Bool, alt: Bool, shift: Bool) =>
+    _editor.home_key()
+
+  fun ref end_key(ctrl: Bool, alt: Bool, shift: Bool) =>
+    _editor.end_key()
+
+  fun ref page_up(ctrl: Bool, alt: Bool, shift: Bool) =>
+    _editor.page_up()
+
+  fun ref page_down(ctrl: Bool, alt: Bool, shift: Bool) =>
+    _editor.page_down()
 
   fun ref size(rows: U16, cols: U16) =>
     _editor.set_size(rows.usize(), cols.usize())
 
   fun ref closed() =>
+    None
+
+class RenderTimerNotify is TimerNotify
+  let _actor: TimerRender tag
+
+  new iso create(editor_actor: TimerRender tag) =>
+    _actor = editor_actor
+
+  fun ref apply(timer: Timer ref, count: U64): Bool =>
+    _actor.render_only()
+    true
+
+  fun ref final(timer: Timer ref) =>
     None
