@@ -33,6 +33,7 @@ class Editor
   var _yank_is_line: Bool = false
   var _count: USize = 0
   var _pending: U8 = 0
+  var _quitting: Bool = false
   let _quit_fn: {()} val
   var _tab_stop: USize = 8
   // Undo stack: snapshots of (lines, cx, cy)
@@ -920,17 +921,23 @@ class Editor
     end
 
   fun ref _quit() =>
+    _quitting = true
     _quit_fn()
 
   // --- Main key dispatch ---
 
-  fun ref key_press(ch: U8) =>
+  fun ref key_press(ch: U8): Bool =>
+    """Returns true if quit was triggered."""
+    _quitting = false
     match _mode
     | ModeNormal => normal_key(ch)
     | ModeInsert => insert_key(ch)
     | ModeCommand => command_key(ch)
     | ModeSearch => search_key(ch)
     end
+    _quitting
+
+  fun ref is_quitting(): Bool => _quitting
 
   fun ref arrow_up() =>
     match _mode

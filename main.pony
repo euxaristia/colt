@@ -57,7 +57,10 @@ actor Main
     ifdef posix then
       @tcsetattr(0, 0, _orig_termios.cpointer())
     end
-    _env.out.write("\x1B[2J\x1B[H")
+    ifdef posix then
+      let clear = "\x1B[2J\x1B[H"
+      @write(1, clear.cpointer(), clear.size())
+    end
     _term.dispose()
     ifdef posix then
       @exit(0)
@@ -67,6 +70,7 @@ actor Main
 actor TimerRender
   let _editor: Editor
   let _main: Main tag
+  var _quit: Bool = false
 
   new create(env: Env, filename: String, main: Main tag) =>
     let self_tag: TimerRender tag = this
@@ -79,14 +83,18 @@ actor TimerRender
     timers(consume t)
 
   be render_only() =>
-    _editor.render()
+    if not _quit and not _editor.is_quitting() then
+      _editor.render()
+    end
 
   be quit() =>
+    _quit = true
     _main.quit()
 
   be key_press(ch: U8) =>
-    _editor.key_press(ch)
-    _editor.render()
+    if not _editor.key_press(ch) then
+      _editor.render()
+    end
 
   be arrow_up() =>
     _editor.arrow_up()
