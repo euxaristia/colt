@@ -112,11 +112,12 @@ class Editor
     if _cy >= (_row_off + _rows) then
       _row_off = (_cy - _rows) + 1
     end
+    let tc = _text_cols()
     if _rx < _col_off then
       _col_off = _rx
     end
-    if _rx >= (_col_off + _cols) then
-      _col_off = (_rx - _cols) + 1
+    if _rx >= (_col_off + tc) then
+      _col_off = (_rx - tc) + 1
     end
 
   fun _cx_to_rx(row: USize, cx: USize): USize =>
@@ -139,6 +140,28 @@ class Editor
 
   fun _now_seconds(): U64 =>
     (Time.nanos() / 1_000_000_000).u64()
+
+  fun _gutter_width(): USize =>
+    if (_buf.filename.size() == 0) and (_buf.line_count() == 0) then
+      0
+    else
+      let n = if _buf.line_count() > 0 then _buf.line_count() else 1 end
+      var w: USize = 1
+      var tmp = n
+      while tmp >= 10 do
+        tmp = tmp / 10
+        w = w + 1
+      end
+      w
+    end
+
+  fun _gutter_cols(): USize =>
+    let g = _gutter_width()
+    if g > 0 then g + 1 else 0 end
+
+  fun _text_cols(): USize =>
+    let g = _gutter_cols()
+    if _cols > g then _cols - g else 1 end
 
   fun _cur_line_len(): USize =>
     _buf.line_len(_cy)
@@ -1010,14 +1033,25 @@ class Editor
     out.append("\x1B[H")     // move to top-left
 
     // Draw lines
+    let gw = _gutter_width()
     var screen_row: USize = 0
     while screen_row < _rows do
       let file_row = screen_row + _row_off
       if file_row < _buf.line_count() then
+        // Draw gutter (line number)
+        if gw > 0 then
+          _draw_gutter(out, file_row + 1)
+        end
         _draw_line(out, file_row)
       else
         out.append(ANSI.grey())
         out.push('~')
+        let gc = _gutter_cols()
+        var g: USize = 0
+        while g < gc do
+          out.push(' ')
+          g = g + 1
+        end
         out.append(ANSI.reset())
       end
       out.append("\x1B[K")  // clear to end of line
@@ -1035,7 +1069,7 @@ class Editor
 
     // Position cursor
     let cursor_row = (_cy - _row_off) + 1
-    let cursor_col = (_rx - _col_off) + 1
+    let cursor_col = (_rx - _col_off) + _gutter_cols() + 1
     out.append("\x1B[")
     out.append(cursor_row.string())
     out.push(';')
@@ -1052,26 +1086,41 @@ class Editor
     let l = _buf.line(file_row)
     var col: USize = 0
     var rx: USize = 0
+    let tc = _text_cols()
     while col < l.size() do
       let ch = try l(col)? else ' ' end
       if ch == '\t' then
         let spaces = _tab_stop - (rx % _tab_stop)
         var s: USize = 0
         while s < spaces do
-          if (rx >= _col_off) and (rx < (_col_off + _cols)) then
+          if (rx >= _col_off) and (rx < (_col_off + tc)) then
             out.push(' ')
           end
           rx = rx + 1
           s = s + 1
         end
       else
-        if (rx >= _col_off) and (rx < (_col_off + _cols)) then
+        if (rx >= _col_off) and (rx < (_col_off + tc)) then
           out.push(ch)
         end
         rx = rx + 1
       end
       col = col + 1
     end
+
+  fun _draw_gutter(out: String ref, line_num: USize) =>
+    let gw = _gutter_width()
+    let num_str: String val = line_num.string().clone()
+    let padding = if gw > num_str.size() then gw - num_str.size() else 0 end
+    out.append(ANSI.grey())
+    var p: USize = 0
+    while p < padding do
+      out.push(' ')
+      p = p + 1
+    end
+    out.append(num_str)
+    out.push(' ')
+    out.append(ANSI.reset())
 
   fun _draw_status_bar(out: String ref) =>
     out.append("\x1B[7m")  // reverse video
