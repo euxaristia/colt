@@ -21,10 +21,13 @@ actor Main
       let raw = Array[U8].init(0, 256)
       @tcgetattr(0, raw.cpointer())
       @cfmakeraw(raw.cpointer())
-      // Re-enable output processing so \n works properly as \r\n
-      // c_oflag is at offset 4, OPOST = 1
-      // Actually, we'll handle \r\n ourselves in rendering
       @tcsetattr(0, 0, raw.cpointer())
+    end
+
+    // Enable SGR mouse mode (scroll wheel tracking)
+    ifdef posix then
+      let mouse_on = "\x1B[?1000h\x1B[?1006h"
+      @write(1, mouse_on.cpointer(), mouse_on.size())
     end
 
     let filename: String val = try env.args(1)? else "" end
@@ -37,23 +40,20 @@ actor Main
       env.input)
     _term = term
 
-    // Connect stdin to ANSITerm
+    // Connect stdin — intercept mouse sequences before ANSITerm
     env.input(
-      object iso is InputNotify
-        let _t: ANSITerm tag = term
-
-        fun ref apply(data: Array[U8] iso) =>
-          _t(consume data)
-
-        fun ref dispose() =>
-          _t.dispose()
-      end,
-      32)
+      recover iso MouseInputNotify(term, editor) end,
+      512)  // Larger buffer to capture full mouse sequences
 
     // Start the periodic timer
     editor.start_timer()
 
   be quit() =>
+    // Disable mouse mode
+    ifdef posix then
+      let mouse_off = "\x1B[?1006l\x1B[?1000l"
+      @write(1, mouse_off.cpointer(), mouse_off.size())
+    end
     ifdef posix then
       @tcsetattr(0, 0, _orig_termios.cpointer())
     end
@@ -132,6 +132,14 @@ actor TimerRender
     _editor.page_down()
     _editor.render()
 
+  be scroll_up() =>
+    _editor.scroll_up()
+    _editor.render()
+
+  be scroll_down() =>
+    _editor.scroll_down()
+    _editor.render()
+
   be set_size(rows: USize, cols: USize) =>
     _editor.set_size(rows, cols)
 
@@ -190,3 +198,83 @@ class RenderTimerNotify is TimerNotify
 
   fun ref final(timer: Timer ref) =>
     None
+
+class MouseInputNotify is InputNotify
+  let _t: ANSITerm tag
+  let _e: TimerRender tag
+  var _in_mouse: Bool = false
+  embed _mouse_buf: String ref = String
+
+  new create(t: ANSITerm tag, e: TimerRender tag) =>
+    _t = t
+    _e = e
+
+  fun ref apply(data: Array[U8] iso) =>
+    let non_mouse = recover iso Array[U8] end
+    var i: USize = 0
+    let d: Array[U8] ref = consume ref data
+
+    while i < d.size() do
+      if _in_mouse then
+        let ch = try d(i)? else i = i + 1; continue end
+        _mouse_buf.push(ch)
+        if (ch == 'M') or (ch == 'm') then
+          _parse_mouse()
+          _in_mouse = false
+          _mouse_buf.clear()
+        end
+        i = i + 1
+      elseif _check_mouse_start(d, i) then
+        _in_mouse = true
+        _mouse_buf.clear()
+        i = i + 3
+      else
+        try non_mouse.push(d(i)?) end
+        i = i + 1
+      end
+    end
+
+    if non_mouse.size() > 0 then
+      _t(consume non_mouse)
+    end
+
+  fun _check_mouse_start(d: Array[U8] ref, i: USize): Bool =>
+    if (i + 2) >= d.size() then return false end
+    try
+      (d(i)? == 0x1B) and (d(i + 1)? == '[') and (d(i + 2)? == '<')
+    else
+      false
+    end
+
+  fun ref _parse_mouse() =>
+    if _mouse_buf.size() < 4 then return end
+    let params_iso = _mouse_buf.substring(0, (_mouse_buf.size() - 1).isize())
+    let params: String val = consume params_iso
+    var parts = Array[String val](3)
+    var start: USize = 0
+    var j: USize = 0
+    while j < params.size() do
+      if (try params(j)? else 0 end) == ';' then
+        let p_iso = params.substring(start.isize(), j.isize())
+        let p: String val = consume p_iso
+        parts.push(p)
+        start = j + 1
+      end
+      j = j + 1
+    end
+    let last_iso = params.substring(start.isize())
+    let last: String val = consume last_iso
+    parts.push(last)
+
+    if parts.size() < 3 then return end
+    try
+      let button = parts(0)?.usize()?
+      if button == 64 then
+        _e.scroll_up()
+      elseif button == 65 then
+        _e.scroll_down()
+      end
+    end
+
+  fun ref dispose() =>
+    _t.dispose()

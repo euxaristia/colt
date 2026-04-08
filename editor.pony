@@ -171,11 +171,12 @@ class Editor
 
   fun ref _scroll() =>
     _rx = _cx_to_rx(_cy, _cx)
-    if _cy < _row_off then
-      _row_off = _cy
+    let so = _scrolloff()
+    if _cy < (_row_off + so) then
+      _row_off = if _cy >= so then _cy - so else 0 end
     end
-    if _cy >= (_row_off + _rows) then
-      _row_off = (_cy - _rows) + 1
+    if (_cy + so) >= (_row_off + _rows) then
+      _row_off = ((_cy + so) - _rows) + 1
     end
     let tc = _text_cols()
     if _rx < _col_off then
@@ -1785,6 +1786,36 @@ class Editor
 
   fun ref page_down() =>
     _move_down(_rows)
+
+  fun _scrolloff(): USize =>
+    USize(5).min(_rows / 2)
+
+  fun ref scroll_up() =>
+    """Scroll viewport up 3 lines (mouse wheel)."""
+    if _row_off >= 3 then
+      _row_off = _row_off - 3
+    else
+      _row_off = 0
+    end
+    let so = _scrolloff()
+    if _cy >= ((_row_off + _rows) - so) then
+      _cy = (((_row_off + _rows) - so) - 1).max(_row_off)
+      _clamp_cursor()
+    end
+
+  fun ref scroll_down() =>
+    """Scroll viewport down 3 lines (mouse wheel)."""
+    let max_off = if _buf.line_count() > _rows then
+      _buf.line_count() - _rows
+    else
+      0
+    end
+    _row_off = (_row_off + 3).min(max_off)
+    let so = _scrolloff()
+    if _cy < (_row_off + so) then
+      _cy = (_row_off + so).min(_buf.line_count() - 1)
+      _clamp_cursor()
+    end
 
   // ── Rendering ──
 
