@@ -78,6 +78,69 @@ class Buffer
       end
     end
 
+  fun ref delete_range(sr: USize, sc: USize, er: USize, ec: USize) =>
+    """Delete text from (sr,sc) to (er,ec) inclusive."""
+    if sr == er then
+      // Same line: delete chars from sc to ec
+      try
+        let l = lines(sr)?
+        if ec < l.size() then
+          l.delete(sc.isize(), (ec - sc) + 1)
+        else
+          l.truncate(sc)
+        end
+        dirty = true
+      end
+    else
+      // Multi-line
+      try
+        // Keep text before sc on first line
+        let first = lines(sr)?
+        let after_text = try lines(er)?.substring((ec + 1).isize()) else "" end
+        first.truncate(sc)
+        first.append(after_text)
+        // Delete intermediate + last lines (backwards to preserve indices)
+        var i = er
+        while i > sr do
+          try lines.delete(i)? end
+          i = i - 1
+        end
+        dirty = true
+      end
+    end
+
+  fun ref indent_lines(from_row: USize, to_row: USize, width: USize = 2) =>
+    var r = from_row
+    while r <= to_row.min(lines.size() - 1) do
+      try
+        let l = lines(r)?
+        var i: USize = 0
+        while i < width do
+          l.insert_byte(0, ' ')
+          i = i + 1
+        end
+      end
+      r = r + 1
+    end
+    dirty = true
+
+  fun ref outdent_lines(from_row: USize, to_row: USize, width: USize = 2) =>
+    var r = from_row
+    while r <= to_row.min(lines.size() - 1) do
+      try
+        let l = lines(r)?
+        var removed: USize = 0
+        while (removed < width) and (l.size() > 0) and
+          ((try l(0)? else 'x' end) == ' ')
+        do
+          l.delete(0, 1)
+          removed = removed + 1
+        end
+      end
+      r = r + 1
+    end
+    dirty = true
+
   fun ref load(auth: FileAuth) =>
     if filename.size() > 0 then
       let path = FilePath(auth, filename)

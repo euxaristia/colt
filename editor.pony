@@ -8,8 +8,11 @@ primitive ModeNormal
 primitive ModeInsert
 primitive ModeCommand
 primitive ModeSearch
+primitive ModeVisual
+primitive ModeVisualLine
 
-type Mode is (ModeNormal | ModeInsert | ModeCommand | ModeSearch)
+type Mode is (ModeNormal | ModeInsert | ModeCommand | ModeSearch
+  | ModeVisual | ModeVisualLine)
 
 class Editor
   let _env: Env
@@ -17,7 +20,7 @@ class Editor
   var _buf: Buffer
   var _cx: USize = 0
   var _cy: USize = 0
-  var _rx: USize = 0         // render x (accounts for tabs)
+  var _rx: USize = 0
   var _row_off: USize = 0
   var _col_off: USize = 0
   var _rows: USize = 24
@@ -25,10 +28,10 @@ class Editor
   var _mode: Mode = ModeNormal
   var _cmd_buf: String ref = String
   var _search_buf: String ref = String
-  var _search_dir: Bool = true  // true = forward
+  var _search_dir: Bool = true
   var _message: String = ""
   var _msg_time: U64 = 0
-  var _msg_transient: Bool = false  // true = auto-clear after 5s
+  var _msg_transient: Bool = false
   var _yank_lines: Array[String] ref = Array[String]
   var _yank_is_line: Bool = false
   var _count: USize = 0
@@ -36,9 +39,30 @@ class Editor
   var _quitting: Bool = false
   let _quit_fn: {()} val
   var _tab_stop: USize = 8
-  // Undo stack: snapshots of (lines, cx, cy)
+  // Undo / redo
   var _undo_stack: Array[(Array[String val], USize, USize)] ref =
     Array[(Array[String val], USize, USize)]
+  var _redo_stack: Array[(Array[String val], USize, USize)] ref =
+    Array[(Array[String val], USize, USize)]
+  // Operator pending (d, y, c, >, <)
+  var _operator: U8 = 0
+  var _op_count: USize = 0
+  // f/F/t/T
+  var _pending_find: U8 = 0
+  var _last_find_char: U8 = 0
+  var _last_find_dir: I8 = 1
+  var _last_find_till: Bool = false
+  // Marks
+  var _marks: Array[(USize, USize)] ref = Array[(USize, USize)].init((0, 0), 26)
+  var _mark_set: Array[Bool] ref = Array[Bool].init(false, 26)
+  // Visual selection
+  var _sel_sx: USize = 0
+  var _sel_sy: USize = 0
+  // Dot repeat
+  var _dot_keys: Array[U8] ref = Array[U8]
+  var _dot_recording: Array[U8] ref = Array[U8]
+  var _dot_is_recording: Bool = false
+  var _dot_replaying: Bool = false
 
   new create(env: Env, filename: String, quit_fn: {()} val) =>
     _env = env
@@ -68,12 +92,12 @@ class Editor
   fun ref set_size(rows: USize, cols: USize) =>
     let r = if rows > 2 then rows else 24 end
     let c = if cols > 0 then cols else 80 end
-    _rows = r - 2  // reserve status + cmd line
+    _rows = r - 2
     _cols = c
     _scroll()
     render()
 
-  // --- Undo ---
+  // ── Undo / Redo ──
 
   fun ref _save_undo() =>
     let arr = Array[String val](_buf.lines.size())
@@ -85,11 +109,14 @@ class Editor
     if _undo_stack.size() > 200 then
       try _undo_stack.shift()? end
     end
+    _redo_stack.clear()
 
   fun ref _undo() =>
     if _undo_stack.size() > 1 then
       try
-        _undo_stack.pop()?  // discard current state
+        // Save current state to redo before restoring
+        let cur = _undo_stack.pop()?
+        _redo_stack.push(cur)
         (let snapshot, let cx, let cy) = _undo_stack.pop()?
         _buf.lines.clear()
         for l in snapshot.values() do
@@ -100,13 +127,43 @@ class Editor
         _cx = _cx.min(_cur_line_max())
         _buf.dirty = true
         _save_undo()
+        // Re-add the redo entry since _save_undo cleared it
+        _redo_stack.push(cur)
         _set_message("Undo")
       end
     else
       _set_message("Already at oldest change")
     end
 
-  // --- Scrolling ---
+  fun ref _redo() =>
+    if _redo_stack.size() > 0 then
+      try
+        (let snapshot, let cx, let cy) = _redo_stack.pop()?
+        _buf.lines.clear()
+        for l in snapshot.values() do
+          _buf.lines.push(l.clone())
+        end
+        _cx = cx
+        _cy = cy.min(_buf.line_count() - 1)
+        _cx = _cx.min(_cur_line_max())
+        _buf.dirty = true
+        // Push restored state onto undo without clearing redo
+        let arr = Array[String val](_buf.lines.size())
+        for l in _buf.lines.values() do
+          let s: String val = l.clone()
+          arr.push(s)
+        end
+        _undo_stack.push((arr, _cx, _cy))
+        if _undo_stack.size() > 200 then
+          try _undo_stack.shift()? end
+        end
+        _set_message("Redo")
+      end
+    else
+      _set_message("Already at newest change")
+    end
+
+  // ── Scrolling ──
 
   fun ref _scroll() =>
     _rx = _cx_to_rx(_cy, _cx)
@@ -140,7 +197,7 @@ class Editor
     end
     rx
 
-  // --- Helpers ---
+  // ── Helpers ──
 
   fun _now_seconds(): U64 =>
     (Time.nanos() / 1_000_000_000).u64()
@@ -192,7 +249,40 @@ class Editor
     _msg_time = _now_seconds()
     _msg_transient = transient
 
-  // --- Movement ---
+  // ── Dot repeat ──
+
+  fun ref _dot_start(ch: U8) =>
+    if _dot_replaying then return end
+    _dot_is_recording = true
+    _dot_recording.clear()
+    _dot_recording.push(ch)
+
+  fun ref _dot_record(ch: U8) =>
+    if _dot_is_recording and (not _dot_replaying) then
+      _dot_recording.push(ch)
+    end
+
+  fun ref _dot_stop() =>
+    if _dot_is_recording and (not _dot_replaying) then
+      _dot_is_recording = false
+      _dot_keys.clear()
+      for k in _dot_recording.values() do
+        _dot_keys.push(k)
+      end
+    end
+
+  fun ref _dot_replay() =>
+    if _dot_keys.size() == 0 then return end
+    _dot_replaying = true
+    // Copy keys to avoid mutation during replay
+    let keys = Array[U8](_dot_keys.size())
+    for k in _dot_keys.values() do keys.push(k) end
+    for k in keys.values() do
+      key_press(k)
+    end
+    _dot_replaying = false
+
+  // ── Movement ──
 
   fun ref _move_left(n: USize = 1) =>
     var i: USize = 0
@@ -253,11 +343,9 @@ class Editor
           _cx = 0
         end
       else
-        // Skip current word chars
         while (_cx < len) and _is_word_char(try l(_cx)? else ' ' end) do
           _cx = _cx + 1
         end
-        // Skip non-word chars
         while (_cx < len) and (not _is_word_char(try l(_cx)? else ' ' end)) do
           _cx = _cx + 1
         end
@@ -265,7 +353,6 @@ class Editor
           if _cy < (_buf.line_count() - 1) then
             _cy = _cy + 1
             _cx = 0
-            // Skip leading whitespace on new line
             let nl = _buf.line(_cy)
             while (_cx < nl.size()) and
               (((try nl(_cx)? else 'a' end) == ' ') or
@@ -291,11 +378,9 @@ class Editor
       else
         let l = _buf.line(_cy)
         _cx = _cx - 1
-        // Skip non-word chars backward
         while (_cx > 0) and (not _is_word_char(try l(_cx)? else ' ' end)) do
           _cx = _cx - 1
         end
-        // Skip word chars backward
         while (_cx > 0) and _is_word_char(try l(_cx - 1)? else ' ' end) do
           _cx = _cx - 1
         end
@@ -313,7 +398,6 @@ class Editor
           _cy = _cy + 1
           _cx = 0
           let nl = _buf.line(_cy)
-          // Skip whitespace
           while (_cx < nl.size()) and
             (((try nl(_cx)? else 'a' end) == ' ') or
             ((try nl(_cx)? else 'a' end) == '\t'))
@@ -323,11 +407,9 @@ class Editor
         end
       else
         _cx = _cx + 1
-        // Skip non-word
         while (_cx < len) and (not _is_word_char(try l(_cx)? else ' ' end)) do
           _cx = _cx + 1
         end
-        // Go to end of word
         while (_cx < (len - 1)) and _is_word_char(try l(_cx + 1)? else ' ' end) do
           _cx = _cx + 1
         end
@@ -342,7 +424,49 @@ class Editor
     ((ch >= '0') and (ch <= '9')) or
     (ch == '_')
 
-  // --- Editing ---
+  // ── f/F/t/T ──
+
+  fun ref _find_char_on_line(ch: U8, dir: I8, till: Bool): Bool =>
+    let l = _buf.line(_cy)
+    let len = l.size()
+    if len == 0 then return false end
+    _last_find_char = ch
+    _last_find_dir = dir
+    _last_find_till = till
+    if dir == 1 then
+      // Forward
+      var i = _cx + 1
+      while i < len do
+        if (try l(i)? else 0 end) == ch then
+          _cx = if till then i - 1 else i end
+          return true
+        end
+        i = i + 1
+      end
+    else
+      // Backward
+      if _cx == 0 then return false end
+      var i = _cx - 1
+      while true do
+        if (try l(i)? else 0 end) == ch then
+          _cx = if till then i + 1 else i end
+          return true
+        end
+        if i == 0 then break end
+        i = i - 1
+      end
+    end
+    false
+
+  fun ref _repeat_find_char(reverse: Bool) =>
+    if _last_find_char == 0 then
+      _set_message("No previous search")
+      return
+    end
+    let dir: I8 = if reverse then -_last_find_dir else _last_find_dir end
+    _find_char_on_line(_last_find_char, dir, _last_find_till)
+
+  // ── Editing ──
 
   fun ref _insert_char(ch: U8) =>
     _buf.insert_char(_cy, _cx, ch)
@@ -391,7 +515,6 @@ class Editor
     if _cy < (_buf.line_count() - 1) then
       _save_undo()
       let cur_len = _buf.line_len(_cy)
-      // Add a space if current line is non-empty
       if cur_len > 0 then
         _buf.insert_char(_cy, cur_len, ' ')
       end
@@ -399,7 +522,301 @@ class Editor
       _cx = cur_len
     end
 
-  // --- Search ---
+  // ── Yank range ──
+
+  fun ref _yank_range(sx: USize, sy: USize, ex: USize, ey: USize, is_line: Bool) =>
+    _yank_lines.clear()
+    if is_line then
+      var r = sy
+      while r <= ey.min(_buf.line_count() - 1) do
+        _yank_lines.push(_buf.line(r).clone())
+        r = r + 1
+      end
+      _yank_is_line = true
+    else
+      if sy == ey then
+        let l = _buf.line(sy)
+        let from = sx.min(l.size())
+        let to = (ex + 1).min(l.size())
+        _yank_lines.push(l.substring(from.isize(), to.isize()).clone())
+        _yank_is_line = false
+      else
+        // First line from sx to end
+        let fl = _buf.line(sy)
+        _yank_lines.push(fl.substring(sx.isize()).clone())
+        // Middle lines
+        var r = sy + 1
+        while r < ey do
+          _yank_lines.push(_buf.line(r).clone())
+          r = r + 1
+        end
+        // Last line from start to ex
+        let ll = _buf.line(ey)
+        _yank_lines.push(ll.substring(0, (ex + 1).isize()).clone())
+        _yank_is_line = false
+      end
+    end
+
+  // ── Execute motion (returns true if motion was recognized) ──
+
+  fun ref _execute_motion(ch: U8, count: USize): Bool =>
+    match ch
+    | 'h' => _move_left(count); true
+    | 'l' => _move_right(count); true
+    | 'j' => _move_down(count); true
+    | 'k' => _move_up(count); true
+    | 'w' => _move_word_forward(count); true
+    | 'b' => _move_word_backward(count); true
+    | 'e' => _move_word_end(count); true
+    | '0' => _move_to_line_start(); true
+    | '$' => _move_to_line_end(); true
+    | '^' => _move_to_first_nonblank(); true
+    | 'G' =>
+      _cy = (_buf.line_count() - 1).min(if count > 1 then count - 1 else _buf.line_count() - 1 end)
+      _clamp_cursor()
+      true
+    | 'H' =>
+      _cy = _row_off
+      _clamp_cursor()
+      true
+    | 'M' =>
+      _cy = _row_off + (_rows / 2)
+      _clamp_cursor()
+      true
+    | 'L' =>
+      _cy = ((_row_off + _rows) - 1).min(_buf.line_count() - 1)
+      _clamp_cursor()
+      true
+    else
+      false
+    end
+
+  fun _is_linewise_motion(ch: U8): Bool =>
+    (ch == 'j') or (ch == 'k') or (ch == 'G')
+
+  // ── Operator handling ──
+
+  fun ref _handle_operator(op: U8, ch: U8, count: USize) =>
+    """Handle operator+motion: compute range, apply operator."""
+    // Check for doubled operator (dd, yy, cc, >>, <<)
+    if ch == op then
+      let sy = _cy
+      let ey = ((_cy + count) - 1).min(_buf.line_count() - 1)
+      match op
+      | 'd' =>
+        _save_undo()
+        _yank_range(0, sy, _buf.line_len(ey), ey, true)
+        var i: USize = 0
+        while i < count do
+          if _buf.line_count() > 1 then
+            _buf.delete_line(_cy)
+          elseif _buf.line_len(_cy) > 0 then
+            try _buf.lines(_cy)?.clear() end
+            _buf.dirty = true
+            _cx = 0
+          end
+          i = i + 1
+        end
+        if _buf.line_count() == 0 then _buf.lines.push(String) end
+        _clamp_cursor()
+        _dot_stop()
+        let msg = String
+        msg.append(count.string())
+        msg.append(if count == 1 then " line deleted" else " lines deleted" end)
+        _set_message(msg.clone())
+      | 'y' =>
+        _yank_range(0, sy, _buf.line_len(ey), ey, true)
+        _dot_stop()
+        let msg = String
+        msg.append(count.string())
+        msg.append(if count == 1 then " line yanked" else " lines yanked" end)
+        _set_message(msg.clone())
+      | 'c' =>
+        _save_undo()
+        _yank_range(0, sy, _buf.line_len(ey), ey, true)
+        // Delete lines and replace with empty line
+        var i: USize = 0
+        let del_count = (ey - sy) + 1
+        while i < del_count do
+          if _buf.line_count() > 1 then
+            _buf.delete_line(sy)
+          else
+            try _buf.lines(sy)?.clear() end
+            _buf.dirty = true
+          end
+          i = i + 1
+        end
+        if _buf.line_count() == 0 then _buf.lines.push(String) end
+        _buf.insert_line(sy, "")
+        _cy = sy
+        _cx = 0
+        _mode = ModeInsert
+      | '>' =>
+        _save_undo()
+        _buf.indent_lines(sy, ey)
+        _dot_stop()
+      | '<' =>
+        _save_undo()
+        _buf.outdent_lines(sy, ey)
+        _dot_stop()
+      end
+      return
+    end
+
+    // f/F/t/T as operator motion
+    if (ch == 'f') or (ch == 'F') or (ch == 't') or (ch == 'T') then
+      // Need next char — set up combined pending state
+      _pending_find = ch
+      // _operator and _op_count stay set; find handler will trigger operator
+      return
+    end
+
+    // gg as operator motion
+    if ch == 'g' then
+      _pending = 'g'
+      return
+    end
+
+    // Execute the motion to find the destination
+    let sx = _cx
+    let sy = _cy
+    if not _execute_motion(ch, count) then
+      // Unknown motion — cancel operator
+      _dot_stop()
+      return
+    end
+    let dx = _cx
+    let dy = _cy
+
+    let is_line = _is_linewise_motion(ch)
+
+    // Normalize range
+    var r_sx: USize = 0
+    var r_sy: USize = 0
+    var r_ex: USize = 0
+    var r_ey: USize = 0
+    if (sy < dy) or ((sy == dy) and (sx <= dx)) then
+      r_sx = sx; r_sy = sy; r_ex = dx; r_ey = dy
+    else
+      r_sx = dx; r_sy = dy; r_ex = sx; r_ey = sy
+    end
+
+    // For line-wise motions, extend to full lines
+    if is_line then
+      r_sx = 0
+      r_ex = _buf.line_len(r_ey)
+    end
+
+    match op
+    | 'd' =>
+      _save_undo()
+      _yank_range(r_sx, r_sy, r_ex, r_ey, is_line)
+      if is_line then
+        var i = r_ey
+        while i >= r_sy do
+          if _buf.line_count() > 1 then
+            _buf.delete_line(i)
+          else
+            try _buf.lines(i)?.clear() end
+            _buf.dirty = true
+          end
+          if i == 0 then break end
+          i = i - 1
+        end
+        if _buf.line_count() == 0 then _buf.lines.push(String) end
+      else
+        _buf.delete_range(r_sy, r_sx, r_ey, r_ex)
+      end
+      _cy = r_sy
+      _cx = r_sx
+      _clamp_cursor()
+      _dot_stop()
+    | 'y' =>
+      _yank_range(r_sx, r_sy, r_ex, r_ey, is_line)
+      _cy = sy; _cx = sx  // Restore cursor after yank
+      _dot_stop()
+      let n_lines = (r_ey - r_sy) + 1
+      if n_lines > 1 then
+        let msg = String
+        msg.append(n_lines.string())
+        msg.append(" lines yanked")
+        _set_message(msg.clone())
+      end
+    | 'c' =>
+      _save_undo()
+      _yank_range(r_sx, r_sy, r_ex, r_ey, is_line)
+      if is_line then
+        var i = r_ey
+        while i >= r_sy do
+          if _buf.line_count() > 1 then
+            _buf.delete_line(i)
+          else
+            try _buf.lines(i)?.clear() end
+            _buf.dirty = true
+          end
+          if i == 0 then break end
+          i = i - 1
+        end
+        if _buf.line_count() == 0 then _buf.lines.push(String) end
+        _buf.insert_line(r_sy, "")
+        _cy = r_sy
+        _cx = 0
+      else
+        _buf.delete_range(r_sy, r_sx, r_ey, r_ex)
+        _cy = r_sy
+        _cx = r_sx
+      end
+      _mode = ModeInsert
+      // Don't dot_stop — recording continues through insert mode
+    | '>' =>
+      _save_undo()
+      _buf.indent_lines(r_sy, r_ey)
+      _cy = r_sy
+      _move_to_first_nonblank()
+      _dot_stop()
+    | '<' =>
+      _save_undo()
+      _buf.outdent_lines(r_sy, r_ey)
+      _cy = r_sy
+      _move_to_first_nonblank()
+      _dot_stop()
+    end
+
+  // ── Visual mode helpers ──
+
+  fun _visual_range(): (USize, USize, USize, USize) =>
+    """Returns normalized (sx, sy, ex, ey) for the visual selection."""
+    match _mode
+    | ModeVisualLine =>
+      let sy = _sel_sy.min(_cy)
+      let ey = _sel_sy.max(_cy)
+      (0, sy, _buf.line_len(ey), ey)
+    else
+      if (_sel_sy < _cy) or ((_sel_sy == _cy) and (_sel_sx <= _cx)) then
+        (_sel_sx, _sel_sy, _cx, _cy)
+      else
+        (_cx, _cy, _sel_sx, _sel_sy)
+      end
+    end
+
+  fun _in_selection(row: USize, col: USize): Bool =>
+    match _mode
+    | ModeVisual =>
+      (let sx, let sy, let ex, let ey) = _visual_range()
+      if (row < sy) or (row > ey) then return false end
+      if (row == sy) and (row == ey) then return (col >= sx) and (col <= ex) end
+      if row == sy then return col >= sx end
+      if row == ey then return col <= ex end
+      true
+    | ModeVisualLine =>
+      let sy = _sel_sy.min(_cy)
+      let ey = _sel_sy.max(_cy)
+      (row >= sy) and (row <= ey)
+    else
+      false
+    end
+
+  // ── Search ──
 
   fun ref _search_next(forward: Bool) =>
     if _search_buf.size() == 0 then
@@ -434,7 +851,6 @@ class Editor
           wrapped = true
         end
       else
-        // Backward search: find last occurrence before start_col
         var found: ISize = -1
         var search_from: ISize = 0
         while true do
@@ -473,83 +889,117 @@ class Editor
       end
     end
 
-  // --- Key handling: Normal mode ---
+  // ── Key handling: Normal mode ──
 
   fun ref normal_key(ch: U8) =>
     let count = if _count > 0 then _count else 1 end
 
+    // Accumulate count prefix
     if (ch >= '0') and (ch <= '9') and not ((_count == 0) and (ch == '0')) then
       _count = (_count * 10) + (ch - '0').usize()
+      if _dot_is_recording then _dot_record(ch) end
       return
     end
 
-    // Handle pending keys (dd, yy, gg, etc.)
-    if _pending == 'd' then
-      _pending = 0
-      _count = 0
-      if ch == 'd' then
-        _yank_lines.clear()
-        var i: USize = 0
-        while i < count do
-          if _buf.line_count() > 1 then
-            _yank_lines.push(_delete_line())
-          elseif _buf.line_len(_cy) > 0 then
-            _yank_lines.push(_buf.line(_cy).clone())
-            try _buf.lines(_cy)?.clear() end
-            _buf.dirty = true
-            _cx = 0
+    // ── Pending find (f/F/t/T waiting for target char) ──
+    if _pending_find != 0 then
+      let pf = _pending_find
+      _pending_find = 0
+      let dir: I8 = if (pf == 'f') or (pf == 't') then 1 else -1 end
+      let till = (pf == 't') or (pf == 'T')
+      // If operator is pending, this is an operator+find motion
+      if _operator != 0 then
+        let sx = _cx
+        let sy = _cy
+        if _find_char_on_line(ch, dir, till) then
+          let dx = _cx
+          let r_sx = sx.min(dx)
+          let r_ex = sx.max(dx)
+          match _operator
+          | 'd' =>
+            _save_undo()
+            _yank_range(r_sx, _cy, r_ex, _cy, false)
+            _buf.delete_range(_cy, r_sx, _cy, r_ex)
+            _cx = r_sx
+            _clamp_cursor()
+            _dot_record(pf)
+            _dot_record(ch)
+            _dot_stop()
+          | 'y' =>
+            _yank_range(r_sx, _cy, r_ex, _cy, false)
+            _cx = sx
+            _dot_record(pf)
+            _dot_record(ch)
+            _dot_stop()
+          | 'c' =>
+            _save_undo()
+            _yank_range(r_sx, _cy, r_ex, _cy, false)
+            _buf.delete_range(_cy, r_sx, _cy, r_ex)
+            _cx = r_sx
+            _mode = ModeInsert
+            _dot_record(pf)
+            _dot_record(ch)
           end
-          i = i + 1
         end
-        _yank_is_line = true
-        let dmsg = String
-        dmsg.append(count.string())
-        if count == 1 then
-          dmsg.append(" line deleted")
-        else
-          dmsg.append(" lines deleted")
-        end
-        _set_message(dmsg.clone())
+        _operator = 0
+        _op_count = 0
+        _count = 0
         return
       end
-      return
-    end
-
-    if _pending == 'y' then
-      _pending = 0
+      _find_char_on_line(ch, dir, till)
       _count = 0
-      if ch == 'y' then
-        _yank_lines.clear()
-        var row = _cy
-        var i: USize = 0
-        while (i < count) and (row < _buf.line_count()) do
-          _yank_lines.push(_buf.line(row).clone())
-          row = row + 1
-          i = i + 1
-        end
-        _yank_is_line = true
-        let ymsg = String
-        ymsg.append(count.string())
-        if count == 1 then
-          ymsg.append(" line yanked")
-        else
-          ymsg.append(" lines yanked")
-        end
-        _set_message(ymsg.clone())
-        return
-      end
       return
     end
 
+    // ── Pending keys (gg, r+char, ZZ/ZQ, m+char, '+char) ──
     if _pending == 'g' then
       _pending = 0
-      _count = 0
       if ch == 'g' then
-        _cy = 0
-        _cx = 0
-        _clamp_cursor()
-        return
+        if _operator != 0 then
+          // Operator + gg: operate from current pos to line 0
+          let op = _operator
+          let sx = _cx
+          let sy = _cy
+          _cy = 0; _cx = 0
+          let r_sy = _cy.min(sy)
+          let r_ey = _cy.max(sy)
+          _operator = 0
+          match op
+          | 'd' =>
+            _save_undo()
+            _yank_range(0, r_sy, _buf.line_len(r_ey), r_ey, true)
+            var i = r_ey
+            while i >= r_sy do
+              if _buf.line_count() > 1 then _buf.delete_line(i) end
+              if i == 0 then break end
+              i = i - 1
+            end
+            if _buf.line_count() == 0 then _buf.lines.push(String) end
+            _clamp_cursor()
+            _dot_stop()
+          | 'y' =>
+            _yank_range(0, r_sy, _buf.line_len(r_ey), r_ey, true)
+            _cy = sy; _cx = sx
+            _dot_stop()
+          | 'c' =>
+            _save_undo()
+            _yank_range(0, r_sy, _buf.line_len(r_ey), r_ey, true)
+            var i = r_ey
+            while i >= r_sy do
+              if _buf.line_count() > 1 then _buf.delete_line(i) end
+              if i == 0 then break end
+              i = i - 1
+            end
+            if _buf.line_count() == 0 then _buf.lines.push(String) end
+            _buf.insert_line(r_sy, "")
+            _cy = r_sy; _cx = 0
+            _mode = ModeInsert
+          end
+        else
+          _cy = 0; _cx = 0; _clamp_cursor()
+        end
       end
+      _count = 0
       return
     end
 
@@ -558,6 +1008,9 @@ class Editor
       _count = 0
       if _cur_line_len() > 0 then
         _save_undo()
+        _dot_start('r')
+        _dot_record(ch)
+        _dot_stop()
         try _buf.lines(_cy)?.update(_cx, ch)? end
       end
       return
@@ -567,17 +1020,65 @@ class Editor
       _pending = 0
       _count = 0
       if ch == 'Z' then
-        // ZZ: save and quit
-        if _buf.filename.size() > 0 then
-          _buf.save(_auth)
-        end
+        if _buf.filename.size() > 0 then _buf.save(_auth) end
         _quit()
         return
       elseif ch == 'Q' then
-        // ZQ: quit without saving
         _quit()
         return
       end
+      return
+    end
+
+    if _pending == 'm' then
+      _pending = 0
+      _count = 0
+      if (ch >= 'a') and (ch <= 'z') then
+        let idx = (ch - 'a').usize()
+        try _marks.update(idx, (_cy, _cx))? end
+        try _mark_set.update(idx, true)? end
+        let msg = String
+        msg.append("Mark '")
+        msg.push(ch)
+        msg.append("' set")
+        _set_message(msg.clone())
+      end
+      return
+    end
+
+    if _pending == '\'' then
+      _pending = 0
+      _count = 0
+      if (ch >= 'a') and (ch <= 'z') then
+        let idx = (ch - 'a').usize()
+        if try _mark_set(idx)? else false end then
+          try
+            (let mr, let mc) = _marks(idx)?
+            _cy = mr.min(_buf.line_count() - 1)
+            _move_to_first_nonblank()
+          end
+        else
+          let msg = String
+          msg.append("Mark '")
+          msg.push(ch)
+          msg.append("' not set")
+          _set_message(msg.clone())
+        end
+      end
+      return
+    end
+
+    // ── Operator pending ──
+    if _operator != 0 then
+      let op = _operator
+      _operator = 0
+      let oc = _op_count
+      _op_count = 0
+      // Use the larger of operator count and motion count
+      let mc = if count > 1 then count else oc end
+      _dot_record(ch)
+      _handle_operator(op, ch, mc)
+      _count = 0
       return
     end
 
@@ -612,32 +1113,55 @@ class Editor
     | 'L' =>
       _cy = ((_row_off + _rows) - 1).min(_buf.line_count() - 1)
       _clamp_cursor()
+    // f/F/t/T
+    | 'f' => _pending_find = 'f'; _count = count; return
+    | 'F' => _pending_find = 'F'; _count = count; return
+    | 't' => _pending_find = 't'; _count = count; return
+    | 'T' => _pending_find = 'T'; _count = count; return
+    | ';' => _repeat_find_char(false)
+    | ',' => _repeat_find_char(true)
     // Insert mode entry
     | 'i' =>
       _save_undo()
+      _dot_start('i')
       _mode = ModeInsert
     | 'I' =>
       _save_undo()
+      _dot_start('I')
       _move_to_first_nonblank()
       _mode = ModeInsert
     | 'a' =>
       _save_undo()
+      _dot_start('a')
       if _cur_line_len() > 0 then _cx = _cx + 1 end
       _mode = ModeInsert
     | 'A' =>
       _save_undo()
+      _dot_start('A')
       _cx = _cur_line_len()
       _mode = ModeInsert
     | 'o' =>
       _save_undo()
+      _dot_start('o')
       _open_line_below()
     | 'O' =>
       _save_undo()
+      _dot_start('O')
       _open_line_above()
+    // Visual mode
+    | 'v' =>
+      _mode = ModeVisual
+      _sel_sx = _cx
+      _sel_sy = _cy
+    | 'V' =>
+      _mode = ModeVisualLine
+      _sel_sx = 0
+      _sel_sy = _cy
     // Editing
     | 'x' =>
       if _cur_line_len() > 0 then
         _save_undo()
+        _dot_start('x')
         var i: USize = 0
         while i < count do
           if _cx < _cur_line_len() then
@@ -646,20 +1170,24 @@ class Editor
           i = i + 1
         end
         _clamp_cursor()
+        _dot_stop()
       end
     | 'X' =>
       if _cx > 0 then
         _save_undo()
+        _dot_start('X')
         var i: USize = 0
         while (i < count) and (_cx > 0) do
           _cx = _cx - 1
           _delete_char_at_cursor()
           i = i + 1
         end
+        _dot_stop()
       end
     | 'D' =>
       if _cur_line_len() > 0 then
         _save_undo()
+        _dot_start('D')
         let l = try _buf.lines(_cy)? else return end
         _yank_lines.clear()
         _yank_lines.push(l.substring(_cx.isize()).clone())
@@ -667,27 +1195,26 @@ class Editor
         l.truncate(_cx)
         _buf.dirty = true
         _clamp_cursor()
+        _dot_stop()
       end
     | 'C' =>
       _save_undo()
+      _dot_start('C')
       let l = try _buf.lines(_cy)? else return end
       l.truncate(_cx)
       _buf.dirty = true
       _mode = ModeInsert
+    | 'S' =>
+      _save_undo()
+      _dot_start('S')
+      try _buf.lines(_cy)?.clear() end
+      _buf.dirty = true
+      _cx = 0
+      _mode = ModeInsert
     | 'J' =>
+      _dot_start('J')
       _join_line()
-    | 'd' =>
-      _pending = 'd'
-      _count = count
-      return
-    | 'y' =>
-      _pending = 'y'
-      _count = count
-      return
-    | 'g' =>
-      _pending = 'g'
-      _count = count
-      return
+      _dot_stop()
     | 'r' =>
       _pending = 'r'
       _count = count
@@ -695,17 +1222,62 @@ class Editor
     | 'Z' =>
       _pending = 'Z'
       return
+    // Operators
+    | 'd' =>
+      _operator = 'd'
+      _op_count = count
+      _dot_start('d')
+      return
+    | 'y' =>
+      _operator = 'y'
+      _op_count = count
+      _dot_start('y')
+      return
+    | 'c' =>
+      _operator = 'c'
+      _op_count = count
+      _dot_start('c')
+      return
+    | '>' =>
+      _operator = '>'
+      _op_count = count
+      _dot_start('>')
+      return
+    | '<' =>
+      _operator = '<'
+      _op_count = count
+      _dot_start('<')
+      return
+    | 'g' =>
+      _pending = 'g'
+      _count = count
+      return
+    | 'm' =>
+      _pending = 'm'
+      return
+    | '\'' =>
+      _pending = '\''
+      return
+    // Paste
     | 'p' =>
       _save_undo()
+      _dot_start('p')
       _paste_after()
+      _dot_stop()
     | 'P' =>
       _save_undo()
+      _dot_start('P')
       _paste_before()
+      _dot_stop()
+    // Undo / redo
     | 'u' =>
       _undo()
+    | 0x12 =>  // Ctrl-R
+      _redo()
     | '~' =>
       if _cur_line_len() > 0 then
         _save_undo()
+        _dot_start('~')
         try
           let l = _buf.lines(_cy)?
           let ch' = l(_cx)?
@@ -717,7 +1289,11 @@ class Editor
           _buf.dirty = true
           if _cx < _cur_line_max() then _cx = _cx + 1 end
         end
+        _dot_stop()
       end
+    // Dot repeat
+    | '.' =>
+      _dot_replay()
     // Page movement
     | 0x06 =>  // Ctrl-F
       _move_down(_rows)
@@ -727,8 +1303,8 @@ class Editor
       _move_down(_rows / 2)
     | 0x15 =>  // Ctrl-U
       _move_up(_rows / 2)
-    | 0x0C =>  // Ctrl-L (refresh)
-      None  // render() is called after every key anyway
+    | 0x0C =>  // Ctrl-L
+      None
     // Command/search mode
     | ':' =>
       _mode = ModeCommand
@@ -747,18 +1323,21 @@ class Editor
       _search_next(not _search_dir)
     end
 
-  // --- Key handling: Insert mode ---
+  // ── Key handling: Insert mode ──
 
   fun ref insert_key(ch: U8) =>
+    _dot_record(ch)
     match ch
     | 0x1B =>  // Escape
       _mode = ModeNormal
       if _cx > 0 then _cx = _cx - 1 end
       _clamp_cursor()
+      _dot_stop()
     | 0x03 =>  // Ctrl-C
       _mode = ModeNormal
       if _cx > 0 then _cx = _cx - 1 end
       _clamp_cursor()
+      _dot_stop()
     | 0x0D =>  // Enter
       _insert_newline()
     | 0x7F =>  // Backspace (DEL)
@@ -771,26 +1350,182 @@ class Editor
       _insert_char(ch)
     end
 
-  // --- Key handling: Command mode ---
+  // ── Key handling: Visual mode ──
 
-  fun ref command_key(ch: U8) =>
+  fun ref visual_key(ch: U8) =>
+    // Count prefix in visual mode
+    if (ch >= '1') and (ch <= '9') then
+      _count = (_count * 10) + (ch - '0').usize()
+      return
+    end
+    if (ch == '0') and (_count > 0) then
+      _count = _count * 10
+      return
+    end
+
+    let count = if _count > 0 then _count else 1 end
+    _count = 0
+
     match ch
     | 0x1B =>  // Escape
       _mode = ModeNormal
-      _cmd_buf.clear()
+      _set_message("")
     | 0x03 =>  // Ctrl-C
       _mode = ModeNormal
+    // Movement
+    | 'h' => _move_left(count)
+    | 'l' => _move_right(count)
+    | 'j' => _move_down(count)
+    | 'k' => _move_up(count)
+    | 'w' => _move_word_forward(count)
+    | 'b' => _move_word_backward(count)
+    | 'e' => _move_word_end(count)
+    | '0' => _move_to_line_start()
+    | '$' => _move_to_line_end()
+    | '^' => _move_to_first_nonblank()
+    | 'G' =>
+      _cy = _buf.line_count() - 1
+      _clamp_cursor()
+    | 'g' =>
+      _pending = 'g'
+      _count = count
+      return
+    // Toggle visual modes
+    | 'v' =>
+      match _mode
+      | ModeVisual => _mode = ModeNormal
+      | ModeVisualLine =>
+        _mode = ModeVisual
+        _sel_sx = _cx
+      end
+    | 'V' =>
+      match _mode
+      | ModeVisualLine => _mode = ModeNormal
+      | ModeVisual =>
+        _mode = ModeVisualLine
+        _sel_sx = 0
+      end
+    // Operations on selection
+    | 'd' | 'x' =>
+      (let sx, let sy, let ex, let ey) = _visual_range()
+      let is_line = match _mode | ModeVisualLine => true else false end
+      _save_undo()
+      _yank_range(sx, sy, ex, ey, is_line)
+      if is_line then
+        var i = ey
+        while i >= sy do
+          if _buf.line_count() > 1 then _buf.delete_line(i) end
+          if i == 0 then break end
+          i = i - 1
+        end
+        if _buf.line_count() == 0 then _buf.lines.push(String) end
+      else
+        _buf.delete_range(sy, sx, ey, ex)
+      end
+      _cy = sy; _cx = sx
+      _clamp_cursor()
+      _mode = ModeNormal
+    | 'y' =>
+      (let sx, let sy, let ex, let ey) = _visual_range()
+      let is_line = match _mode | ModeVisualLine => true else false end
+      _yank_range(sx, sy, ex, ey, is_line)
+      _cy = sy; _cx = sx
+      _mode = ModeNormal
+      let n_lines = (ey - sy) + 1
+      if n_lines > 1 then
+        let msg = String
+        msg.append(n_lines.string())
+        msg.append(" lines yanked")
+        _set_message(msg.clone())
+      end
+    | 'c' =>
+      (let sx, let sy, let ex, let ey) = _visual_range()
+      let is_line = match _mode | ModeVisualLine => true else false end
+      _save_undo()
+      _yank_range(sx, sy, ex, ey, is_line)
+      if is_line then
+        var i = ey
+        while i >= sy do
+          if _buf.line_count() > 1 then _buf.delete_line(i) end
+          if i == 0 then break end
+          i = i - 1
+        end
+        if _buf.line_count() == 0 then _buf.lines.push(String) end
+        _buf.insert_line(sy, "")
+        _cy = sy; _cx = 0
+      else
+        _buf.delete_range(sy, sx, ey, ex)
+        _cy = sy; _cx = sx
+      end
+      _mode = ModeInsert
+    | '>' =>
+      (let sx, let sy, let ex, let ey) = _visual_range()
+      _save_undo()
+      _buf.indent_lines(sy, ey)
+      _cy = sy
+      _move_to_first_nonblank()
+      _mode = ModeNormal
+    | '<' =>
+      (let sx, let sy, let ex, let ey) = _visual_range()
+      _save_undo()
+      _buf.outdent_lines(sy, ey)
+      _cy = sy
+      _move_to_first_nonblank()
+      _mode = ModeNormal
+    | 'J' =>
+      (let sx, let sy, let ex, let ey) = _visual_range()
+      _save_undo()
+      var r = sy
+      while r < ey do
+        _cy = r
+        _join_line()
+        r = r + 1
+      end
+      _mode = ModeNormal
+    | '~' =>
+      (let sx, let sy, let ex, let ey) = _visual_range()
+      _save_undo()
+      var r = sy
+      while r <= ey do
+        let l = try _buf.lines(r)? else r = r + 1; continue end
+        let cs = if r == sy then sx else 0 end
+        let ce = if r == ey then ex.min(l.size() - 1) else l.size() - 1 end
+        var c = cs
+        while c <= ce do
+          try
+            let b = l(c)?
+            if (b >= 'a') and (b <= 'z') then l.update(c, b - 32)?
+            elseif (b >= 'A') and (b <= 'Z') then l.update(c, b + 32)?
+            end
+          end
+          c = c + 1
+        end
+        r = r + 1
+      end
+      _buf.dirty = true
+      _mode = ModeNormal
+    end
+
+  // ── Key handling: Command mode ──
+
+  fun ref command_key(ch: U8) =>
+    match ch
+    | 0x1B =>
+      _mode = ModeNormal
       _cmd_buf.clear()
-    | 0x0D =>  // Enter
+    | 0x03 =>
+      _mode = ModeNormal
+      _cmd_buf.clear()
+    | 0x0D =>
       _execute_command()
       _mode = ModeNormal
-    | 0x7F =>  // Backspace
+    | 0x7F =>
       if _cmd_buf.size() > 0 then
         try _cmd_buf.pop()? end
       else
         _mode = ModeNormal
       end
-    | 0x08 =>  // Backspace
+    | 0x08 =>
       if _cmd_buf.size() > 0 then
         try _cmd_buf.pop()? end
       else
@@ -800,22 +1535,22 @@ class Editor
       _cmd_buf.push(ch)
     end
 
-  // --- Key handling: Search mode ---
+  // ── Key handling: Search mode ──
 
   fun ref search_key(ch: U8) =>
     match ch
-    | 0x1B =>  // Escape
+    | 0x1B =>
       _mode = ModeNormal
       _search_buf.clear()
-    | 0x03 =>  // Ctrl-C
+    | 0x03 =>
       _mode = ModeNormal
       _search_buf.clear()
-    | 0x0D =>  // Enter
+    | 0x0D =>
       _mode = ModeNormal
       if _search_buf.size() > 0 then
         _search_next(_search_dir)
       end
-    | 0x7F =>  // Backspace
+    | 0x7F =>
       if _search_buf.size() > 0 then
         try _search_buf.pop()? end
       else
@@ -831,7 +1566,7 @@ class Editor
       _search_buf.push(ch)
     end
 
-  // --- Commands ---
+  // ── Commands ──
 
   fun ref _execute_command() =>
     let cmd: String val = _cmd_buf.clone()
@@ -879,7 +1614,6 @@ class Editor
       end
       _set_message(msg.clone())
     else
-      // Try to parse as line number
       try
         let line_num = cmd.usize()?
         if line_num > 0 then
@@ -967,7 +1701,7 @@ class Editor
     _quitting = true
     _quit_fn()
 
-  // --- Main key dispatch ---
+  // ── Main key dispatch ──
 
   fun ref key_press(ch: U8): Bool =>
     """Returns true if quit was triggered."""
@@ -977,6 +1711,8 @@ class Editor
     | ModeInsert => insert_key(ch)
     | ModeCommand => command_key(ch)
     | ModeSearch => search_key(ch)
+    | ModeVisual => visual_key(ch)
+    | ModeVisualLine => visual_key(ch)
     end
     _quitting
 
@@ -986,6 +1722,8 @@ class Editor
     match _mode
     | ModeNormal => _move_up(if _count > 0 then _count else 1 end)
     | ModeInsert => _move_up()
+    | ModeVisual => _move_up(if _count > 0 then _count else 1 end)
+    | ModeVisualLine => _move_up(if _count > 0 then _count else 1 end)
     end
     _count = 0
 
@@ -993,6 +1731,8 @@ class Editor
     match _mode
     | ModeNormal => _move_down(if _count > 0 then _count else 1 end)
     | ModeInsert => _move_down()
+    | ModeVisual => _move_down(if _count > 0 then _count else 1 end)
+    | ModeVisualLine => _move_down(if _count > 0 then _count else 1 end)
     end
     _count = 0
 
@@ -1000,6 +1740,8 @@ class Editor
     match _mode
     | ModeNormal => _move_left(if _count > 0 then _count else 1 end)
     | ModeInsert => _move_left()
+    | ModeVisual => _move_left(if _count > 0 then _count else 1 end)
+    | ModeVisualLine => _move_left(if _count > 0 then _count else 1 end)
     end
     _count = 0
 
@@ -1007,6 +1749,8 @@ class Editor
     match _mode
     | ModeNormal => _move_right(if _count > 0 then _count else 1 end)
     | ModeInsert => _move_right()
+    | ModeVisual => _move_right(if _count > 0 then _count else 1 end)
+    | ModeVisualLine => _move_right(if _count > 0 then _count else 1 end)
     end
     _count = 0
 
@@ -1036,10 +1780,9 @@ class Editor
   fun ref page_down() =>
     _move_down(_rows)
 
-  // --- Rendering ---
+  // ── Rendering ──
 
   fun ref render() =>
-    // Clear expired transient messages (5 second timeout)
     if _msg_transient and (_message.size() > 0) then
       if (_now_seconds() - _msg_time) >= 5 then
         _message = ""
@@ -1049,16 +1792,14 @@ class Editor
 
     _scroll()
     let out = String((_rows + 2) * _cols * 2)
-    out.append("\x1B[?25l")  // hide cursor
-    out.append("\x1B[H")     // move to top-left
+    out.append("\x1B[?25l")
+    out.append("\x1B[H")
 
-    // Draw lines
     let gw = _gutter_width()
     var screen_row: USize = 0
     while screen_row < _rows do
       let file_row = screen_row + _row_off
       if file_row < _buf.line_count() then
-        // Draw gutter (line number)
         if gw > 0 then
           _draw_gutter(out, file_row + 1)
         end
@@ -1074,20 +1815,17 @@ class Editor
         end
         out.append(ANSI.reset())
       end
-      out.append("\x1B[K")  // clear to end of line
+      out.append("\x1B[K")
       out.append("\r\n")
       screen_row = screen_row + 1
     end
 
-    // Status bar
     _draw_status_bar(out)
     out.append("\r\n")
 
-    // Command / message line
     _draw_command_line(out)
     out.append("\x1B[K")
 
-    // Position cursor
     let cursor_row = (_cy - _row_off) + 1
     let cursor_col = (_rx - _col_off) + _gutter_cols() + 1
     out.append("\x1B[")
@@ -1096,7 +1834,7 @@ class Editor
     out.append(cursor_col.string())
     out.push('H')
 
-    out.append("\x1B[?25h")  // show cursor
+    out.append("\x1B[?25h")
 
     ifdef posix then
       @write(1, out.cpointer(), out.size())
@@ -1107,8 +1845,20 @@ class Editor
     var col: USize = 0
     var rx: USize = 0
     let tc = _text_cols()
+    let is_visual = match _mode
+    | ModeVisual => true
+    | ModeVisualLine => true
+    else false end
+
     while col < l.size() do
       let ch = try l(col)? else ' ' end
+      let visible = (rx >= _col_off) and (rx < (_col_off + tc))
+
+      if visible and is_visual then
+        let in_sel = _in_selection(file_row, col)
+        if in_sel then out.append("\x1B[7m") end
+      end
+
       if ch == '\t' then
         let spaces = _tab_stop - (rx % _tab_stop)
         var s: USize = 0
@@ -1125,6 +1875,12 @@ class Editor
         end
         rx = rx + 1
       end
+
+      if visible and is_visual then
+        let in_sel = _in_selection(file_row, col)
+        if in_sel then out.append("\x1B[m") end
+      end
+
       col = col + 1
     end
 
@@ -1143,14 +1899,15 @@ class Editor
     out.append(ANSI.reset())
 
   fun _draw_status_bar(out: String ref) =>
-    out.append("\x1B[7m")  // reverse video
+    out.append("\x1B[7m")
 
-    // Left side: mode + filename
     let mode_str = match _mode
     | ModeNormal => " NORMAL "
     | ModeInsert => " INSERT "
     | ModeCommand => " COMMAND "
     | ModeSearch => " SEARCH "
+    | ModeVisual => " VISUAL "
+    | ModeVisualLine => " V-LINE "
     end
 
     let fname: String val = if _buf.filename.size() > 0 then
@@ -1165,7 +1922,6 @@ class Editor
     left.append(fname)
     left.append(modified)
 
-    // Right side: line/col info
     let right = String
     right.append(" ")
     right.append((_cy + 1).string())
@@ -1188,7 +1944,7 @@ class Editor
       p = p + 1
     end
     out.append(right)
-    out.append("\x1B[m")  // reset
+    out.append("\x1B[m")
 
   fun _draw_command_line(out: String ref) =>
     match _mode
