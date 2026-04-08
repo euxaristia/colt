@@ -105,22 +105,8 @@ class Editor
       _buf.load(_auth)
       _lang = SyntaxDetect(filename)
       _lang_name_str = _detect_lang_name(filename)
-      let m = String
-      m.append("\"")
-      m.append(filename)
-      m.append("\" ")
-      m.append(_buf.line_count().string())
-      if _buf.line_count() == 1 then
-        m.append(" line")
-      else
-        m.append(" lines")
-      end
-      _message = m.clone()
-      _msg_time = _now_seconds()
-      _msg_transient = true
-    else
-      _message = ""
     end
+    _message = ""
     _save_undo()
     // Check git status
     if filename.size() > 0 then
