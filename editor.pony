@@ -63,6 +63,9 @@ class Editor
   var _dot_recording: Array[U8] ref = Array[U8]
   var _dot_is_recording: Bool = false
   var _dot_replaying: Bool = false
+  // Syntax highlighting
+  var _lang: SyntaxLang = LangNone
+  var _hl_bc_state: Array[Bool] ref = Array[Bool]  // per-row: in block comment?
 
   new create(env: Env, filename: String, quit_fn: {()} val) =>
     _env = env
@@ -71,6 +74,7 @@ class Editor
     _buf = Buffer(filename)
     if filename.size() > 0 then
       _buf.load(_auth)
+      _lang = SyntaxDetect(filename)
       let m = String
       m.append("\"")
       m.append(filename)
@@ -1598,6 +1602,8 @@ class Editor
       let fname: String val = cmd.substring(2)
       _buf = Buffer(fname.clone())
       _buf.load(_auth)
+      _lang = SyntaxDetect(fname)
+      _hl_bc_state.clear()
       _cx = 0
       _cy = 0
       _row_off = 0
@@ -1840,7 +1846,34 @@ class Editor
       @write(1, out.cpointer(), out.size())
     end
 
-  fun _draw_line(out: String ref, file_row: USize) =>
+  fun ref _get_block_comment_state(file_row: USize): Bool =>
+    """Get whether this row starts inside a block comment."""
+    // Ensure hl_bc_state is big enough
+    while _hl_bc_state.size() <= file_row do
+      _hl_bc_state.push(false)
+    end
+    if file_row == 0 then return false end
+    try _hl_bc_state(file_row)? else false end
+
+  fun ref _update_hl_state(file_row: USize, in_bc: Bool) =>
+    """Store block comment state for the next row."""
+    let next = file_row + 1
+    while _hl_bc_state.size() <= next do
+      _hl_bc_state.push(false)
+    end
+    try _hl_bc_state.update(next, in_bc)? end
+
+  fun _hl_color(tok: HlToken): String =>
+    match tok
+    | HlKeyword => "\x1B[1;33m"   // bold yellow
+    | HlType    => "\x1B[36m"     // cyan
+    | HlString  => "\x1B[32m"     // green
+    | HlComment => "\x1B[90m"     // bright black (grey)
+    | HlNumber  => "\x1B[35m"     // magenta
+    | HlPreproc => "\x1B[33m"     // yellow
+    else "" end
+
+  fun ref _draw_line(out: String ref, file_row: USize) =>
     let l = _buf.line(file_row)
     var col: USize = 0
     var rx: USize = 0
@@ -1850,13 +1883,43 @@ class Editor
     | ModeVisualLine => true
     else false end
 
+    // Compute syntax tokens for this line
+    let in_bc = _get_block_comment_state(file_row)
+    (let tokens, let out_bc) = Syntax.highlight_line(l, _lang, in_bc)
+    _update_hl_state(file_row, out_bc)
+
+    var prev_tok: HlToken = HlNormal
+    var in_sel: Bool = false
+
     while col < l.size() do
       let ch = try l(col)? else ' ' end
       let visible = (rx >= _col_off) and (rx < (_col_off + tc))
 
-      if visible and is_visual then
-        let in_sel = _in_selection(file_row, col)
-        if in_sel then out.append("\x1B[7m") end
+      // Get token for this position
+      let tok: HlToken = try tokens(col)? else HlNormal end
+
+      if visible then
+        // Handle visual selection start
+        if is_visual then
+          let sel = _in_selection(file_row, col)
+          if sel and (not in_sel) then
+            out.append("\x1B[7m")
+            in_sel = true
+          elseif (not sel) and in_sel then
+            out.append("\x1B[27m")
+            in_sel = false
+          end
+        end
+
+        // Emit color change if token changed
+        if (tok isnt prev_tok) then
+          if tok is HlNormal then
+            out.append("\x1B[39;22m")  // reset fg + bold
+          else
+            out.append(_hl_color(tok))
+          end
+          prev_tok = tok
+        end
       end
 
       if ch == '\t' then
@@ -1870,18 +1933,18 @@ class Editor
           s = s + 1
         end
       else
-        if (rx >= _col_off) and (rx < (_col_off + tc)) then
+        if visible then
           out.push(ch)
         end
         rx = rx + 1
       end
 
-      if visible and is_visual then
-        let in_sel = _in_selection(file_row, col)
-        if in_sel then out.append("\x1B[m") end
-      end
-
       col = col + 1
+    end
+
+    // Reset any lingering attributes
+    if (prev_tok isnt HlNormal) or in_sel then
+      out.append("\x1B[m")
     end
 
   fun _draw_gutter(out: String ref, line_num: USize) =>
