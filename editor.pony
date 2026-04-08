@@ -44,6 +44,12 @@ class Editor
   var _quitting: Bool = false
   let _quit_fn: {()} val
   var _tab_stop: USize = 8
+  var _shift_width: USize = 2
+  var _relativenum: Bool = false
+  var _expandtab: Bool = false
+  // Git dirty state
+  var _git_dirty: Bool = false
+  var _git_branch: String = ""
   // Undo / redo
   var _undo_stack: Array[(Array[String val], USize, USize)] ref =
     Array[(Array[String val], USize, USize)]
@@ -102,6 +108,10 @@ class Editor
       _message = ""
     end
     _save_undo()
+    // Check git status
+    if filename.size() > 0 then
+      _check_git_dirty(filename)
+    end
 
   fun ref set_size(rows: USize, cols: USize) =>
     let r = if rows > 2 then rows else 24 end
@@ -263,6 +273,15 @@ class Editor
     _message = msg
     _msg_time = _now_seconds()
     _msg_transient = transient
+
+  fun ref _check_git_dirty(filename: String box) =>
+    """
+    Track dirty state from buffer. In a full implementation this would
+    call git status via Process API, but since that's async in Pony,
+    we conservatively use buffer dirty state as the indicator.
+    """
+    _git_dirty = _buf.dirty
+    _git_branch = ""
 
   // ── Dot repeat ──
 
@@ -775,6 +794,30 @@ class Editor
     _cx = _cx + 1
 
   fun ref _insert_newline() =>
+    // Auto-indent: copy leading whitespace from current line
+    if _mode is ModeInsert then
+      let l = _buf.line(_cy)
+      var indent_end: USize = 0
+      while indent_end < l.size() do
+        let ch = try l(indent_end)? else ' ' end
+        if (ch != ' ') and (ch != '\t') then break end
+        indent_end = indent_end + 1
+      end
+      if indent_end > 0 then
+        let indent = l.substring(0, indent_end.isize()).clone()
+        _buf.split_line(_cy, _cx)
+        _cy = _cy + 1
+        // Insert indent at start of new line
+        try
+          let nl = _buf.lines(_cy)?
+          let i: String val = consume indent
+          nl.insert(0, i)
+        end
+        _cx = indent_end
+        _buf.dirty = true
+        return
+      end
+    end
     _buf.split_line(_cy, _cx)
     _cy = _cy + 1
     _cx = 0
@@ -2108,6 +2151,36 @@ class Editor
     elseif (cmd.size() > 3) and _has_substitute(cmd) then
       // :%s/pat/rep/g or :.,$s/pat/rep/g
       _substitute(cmd)?
+    elseif cmd == "set" then
+      _set_message("Options: relativenumber, norelativenumber, tabstop=N, shiftwidth=N, expandtab, noexpandtab")
+    elseif cmd == "set relativenumber" then
+      _relativenum = true
+      _set_message("relativenumber")
+    elseif cmd == "set norelativenumber" then
+      _relativenum = false
+      _set_message("norelativenumber")
+    elseif cmd == "set expandtab" then
+      _expandtab = true
+      _set_message("expandtab")
+    elseif cmd == "set noexpandtab" then
+      _expandtab = false
+      _set_message("noexpandtab")
+    elseif (cmd.size() > 9) and (cmd.substring(0, 9) == "set tabstop") then
+      try
+        _tab_stop = cmd.substring(9).usize()?
+        _set_message("tabstop=" + _tab_stop.string())
+      else
+        _set_message("Usage: :set tabstop=N")
+      end
+    elseif (cmd.size() > 12) and (cmd.substring(0, 12) == "set shiftwidth") then
+      try
+        _shift_width = cmd.substring(12).usize()?
+        _set_message("shiftwidth=" + _shift_width.string())
+      else
+        _set_message("Usage: :set shiftwidth=N")
+      end
+    elseif cmd == "set nonumber" then
+      _set_message("number (gutter always shown)")
     else
       try
         let line_num = cmd.usize()?
@@ -2141,6 +2214,7 @@ class Editor
         sm.append(" lines written")
       end
       _set_message(sm.clone())
+      _git_dirty = false
       true
     else
       _set_message("Error writing file")
@@ -2618,7 +2692,20 @@ class Editor
 
   fun _draw_gutter(out: String ref, line_num: USize) =>
     let gw = _gutter_width()
-    let num_str: String val = line_num.string().clone()
+    let num_str: String val = if _relativenum then
+      if line_num == (_cy + 1) then
+        (_cy.string()).clone()
+      else
+        let diff: USize = if line_num > (_cy + 1) then
+          line_num - (_cy + 1)
+        else
+          (_cy + 1) - line_num
+        end
+        (diff.string()).clone()
+      end
+    else
+      (line_num.string()).clone()
+    end
     let padding = if gw > num_str.size() then gw - num_str.size() else 0 end
     out.append(ANSI.grey())
     var p: USize = 0
@@ -2648,11 +2735,22 @@ class Editor
       "[No Name]".clone()
     end
     let modified: String val = if _buf.dirty then " [+]".clone() else "".clone() end
+    let git_info: String val = if _git_branch.size() > 0 then
+      let s = String
+      s.append(" (")
+      s.append(_git_branch)
+      if _git_dirty then s.append("*") end
+      s.append(")")
+      s.clone()
+    else
+      "".clone()
+    end
 
     let left = String
     left.append(mode_str)
     left.append(fname)
     left.append(modified)
+    left.append(git_info)
 
     let right = String
     right.append(" ")
