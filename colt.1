@@ -175,6 +175,18 @@ System clipboard (via xclip/pbcopy)
 .TP
 .B /tmp/colt_clipboard
 Temporary file used for clipboard operations.
+.SH NOTES
+On Linux, clipboard integration requires one of:
+.BR wl-clipboard ,
+.BR xclip ,
+or
+.B xsel
+installed. The editor tries each in order and falls back silently if none
+are available. On macOS,
+.B pbcopy
+and
+.B pbpaste
+are used (included by default).
 .SH ENVIRONMENT
 No special environment variables are used.
 .SH SEE ALSO

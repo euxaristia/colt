@@ -314,7 +314,10 @@ class Editor
     end
 
   fun ref _sync_clipboard() =>
-    """Copy the unnamed register (idx 0) to the system clipboard."""
+    """
+    Copy the unnamed register (idx 0) to the system clipboard.
+    Tries wl-copy, xclip, xsel in order, falls back silently.
+    """
     let reg = try _registers(0)? else return end
     if reg.size() == 0 then return end
     ifdef posix then
@@ -341,19 +344,29 @@ class Editor
       wcmd.append(tmp_path)
       let wcmd_val: String val = consume wcmd
       @system(wcmd_val.cpointer())
-      // Copy to clipboard
+      // Copy to clipboard: try wl-copy, xclip, xsel (linux) or pbcopy (macos)
       ifdef linux then
-        let xcb_cmd = recover iso String end
-        xcb_cmd.append("xclip -selection clipboard < ")
-        xcb_cmd.append(tmp_path)
-        xcb_cmd.append(" 2>/dev/null || true")
-        @system((consume xcb_cmd).cpointer())
+        let clip_cmd = recover val
+          let s = String
+          s.append("(wl-copy < ")
+          s.append(tmp_path)
+          s.append(" 2>/dev/null || xclip -selection clipboard < ")
+          s.append(tmp_path)
+          s.append(" 2>/dev/null || xsel --clipboard --input < ")
+          s.append(tmp_path)
+          s.append(" 2>/dev/null || true)")
+          s
+        end
+        @system(clip_cmd.cpointer())
       else
-        let pb_cmd = recover iso String end
-        pb_cmd.append("cat ")
-        pb_cmd.append(tmp_path)
-        pb_cmd.append(" | pbcopy 2>/dev/null || true")
-        @system((consume pb_cmd).cpointer())
+        let pb_cmd = recover val
+          let s = String
+          s.append("cat ")
+          s.append(tmp_path)
+          s.append(" | pbcopy 2>/dev/null || true")
+          s
+        end
+        @system(pb_cmd.cpointer())
       end
       // Also store locally
       _clipboard_lines.clear()
@@ -362,21 +375,34 @@ class Editor
     end
 
   fun ref _read_clipboard() =>
-    """Read system clipboard into the unnamed register."""
+    """
+    Read system clipboard into the unnamed register.
+    Tries wl-paste, xclip, xsel in order, falls back silently.
+    """
     ifdef posix then
       let tmp_path = "/tmp/colt_clipboard"
       ifdef linux then
-        let cmd = recover iso String end
-        cmd.append("xclip -selection clipboard -o > ")
-        cmd.append(tmp_path)
-        cmd.append(" 2>/dev/null || true")
-        @system((consume cmd).cpointer())
+        let read_cmd = recover val
+          let s = String
+          s.append("(wl-paste > ")
+          s.append(tmp_path)
+          s.append(" 2>/dev/null || xclip -selection clipboard -o > ")
+          s.append(tmp_path)
+          s.append(" 2>/dev/null || xsel --clipboard --output > ")
+          s.append(tmp_path)
+          s.append(" 2>/dev/null || true)")
+          s
+        end
+        @system(read_cmd.cpointer())
       else
-        let cmd = recover iso String end
-        cmd.append("pbpaste > ")
-        cmd.append(tmp_path)
-        cmd.append(" 2>/dev/null || true")
-        @system((consume cmd).cpointer())
+        let pb_cmd = recover val
+          let s = String
+          s.append("pbpaste > ")
+          s.append(tmp_path)
+          s.append(" 2>/dev/null || true")
+          s
+        end
+        @system(pb_cmd.cpointer())
       end
       // Read back the file
       try
