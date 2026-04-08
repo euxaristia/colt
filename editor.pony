@@ -10,9 +10,10 @@ primitive ModeCommand
 primitive ModeSearch
 primitive ModeVisual
 primitive ModeVisualLine
+primitive ModeHelp
 
 type Mode is (ModeNormal | ModeInsert | ModeCommand | ModeSearch
-  | ModeVisual | ModeVisualLine)
+  | ModeVisual | ModeVisualLine | ModeHelp)
 
 class Editor
   let _env: Env
@@ -50,6 +51,8 @@ class Editor
   // Git dirty state
   var _git_dirty: Bool = false
   var _git_branch: String = ""
+  // Help mode
+  var _help_offset: USize = 0
   // Undo / redo
   var _undo_stack: Array[(Array[String val], USize, USize)] ref =
     Array[(Array[String val], USize, USize)]
@@ -282,6 +285,26 @@ class Editor
     """
     _git_dirty = _buf.dirty
     _git_branch = ""
+
+  fun ref _show_help() =>
+    _mode = ModeHelp
+    _help_offset = 0
+
+  fun ref help_key(ch: U8) =>
+    match ch
+    | 0x1B | 0x03 | 'q' | 'Q' =>
+      _mode = ModeNormal
+    | 0x0D | 0x0A | 'j' | ' ' =>
+      _help_scroll_down()
+    | 'k' | 0x08 =>
+      _help_scroll_up()
+    end
+
+  fun ref _help_scroll_up() =>
+    if _help_offset > 0 then _help_offset = _help_offset - 1 end
+
+  fun ref _help_scroll_down() =>
+    _help_offset = _help_offset + 1
 
   // ── Dot repeat ──
 
@@ -1469,13 +1492,24 @@ class Editor
 
     if _pending == 'r' then
       _pending = 0
+      let rc = if _count > 0 then _count else 1 end
       _count = 0
       if _cur_line_len() > 0 then
         _save_undo()
         _dot_start('r')
         _dot_record(ch)
+        var i: USize = 0
+        while i < rc do
+          try
+            let l = _buf.lines(_cy)?
+            if _cx >= l.size() then break end
+            l.update(_cx, ch)?
+            if _cx < _cur_line_max() then _cx = _cx + 1 end
+          end
+          i = i + 1
+        end
+        _buf.dirty = true
         _dot_stop()
-        try _buf.lines(_cy)?.update(_cx, ch)? end
       end
       return
     end
@@ -1715,8 +1749,14 @@ class Editor
       _cx = 0
       _mode = ModeInsert
     | 'J' =>
+      _save_undo()
       _dot_start('J')
-      _join_line()
+      let jc = if count > 0 then count else 1 end
+      var i: USize = 0
+      while i < jc do
+        _join_line()
+        i = i + 1
+      end
       _dot_stop()
     | 'r' =>
       _pending = 'r'
@@ -1784,16 +1824,22 @@ class Editor
       if _cur_line_len() > 0 then
         _save_undo()
         _dot_start('~')
-        try
-          let l = _buf.lines(_cy)?
-          let ch' = l(_cx)?
-          if (ch' >= 'a') and (ch' <= 'z') then
-            l.update(_cx, ch' - 32)?
-          elseif (ch' >= 'A') and (ch' <= 'Z') then
-            l.update(_cx, ch' + 32)?
+        var i: USize = 0
+        let mc = if count > 0 then count else 1 end
+        while i < mc do
+          try
+            let l = _buf.lines(_cy)?
+            if _cx >= l.size() then break end
+            let ch' = l(_cx)?
+            if (ch' >= 'a') and (ch' <= 'z') then
+              l.update(_cx, ch' - 32)?
+            elseif (ch' >= 'A') and (ch' <= 'Z') then
+              l.update(_cx, ch' + 32)?
+            end
+            _buf.dirty = true
+            if _cx < _cur_line_max() then _cx = _cx + 1 end
           end
-          _buf.dirty = true
-          if _cx < _cur_line_max() then _cx = _cx + 1 end
+          i = i + 1
         end
         _dot_stop()
       end
@@ -2181,6 +2227,8 @@ class Editor
       end
     elseif cmd == "set nonumber" then
       _set_message("number (gutter always shown)")
+    elseif (cmd == "h") or (cmd == "help") then
+      _show_help()
     else
       try
         let line_num = cmd.usize()?
@@ -2432,6 +2480,7 @@ class Editor
     | ModeSearch => search_key(ch)
     | ModeVisual => visual_key(ch)
     | ModeVisualLine => visual_key(ch)
+    | ModeHelp => help_key(ch)
     end
     _quitting
 
@@ -2443,6 +2492,7 @@ class Editor
     | ModeInsert => _move_up()
     | ModeVisual => _move_up(if _count > 0 then _count else 1 end)
     | ModeVisualLine => _move_up(if _count > 0 then _count else 1 end)
+    | ModeHelp => _help_scroll_up()
     end
     _count = 0
 
@@ -2452,6 +2502,7 @@ class Editor
     | ModeInsert => _move_down()
     | ModeVisual => _move_down(if _count > 0 then _count else 1 end)
     | ModeVisualLine => _move_down(if _count > 0 then _count else 1 end)
+    | ModeHelp => _help_scroll_down()
     end
     _count = 0
 
@@ -2543,6 +2594,16 @@ class Editor
     let out = String((_rows + 2) * _cols * 2)
     out.append("\x1B[?25l")
     out.append("\x1B[H")
+
+    // ── Help mode rendering ──
+    if _mode is ModeHelp then
+      _draw_help_screen(out)
+      out.append("\x1B[?25h")
+      ifdef posix then
+        @write(1, out.cpointer(), out.size())
+      end
+      return
+    end
 
     let gw = _gutter_width()
     var screen_row: USize = 0
@@ -2717,6 +2778,100 @@ class Editor
     out.push(' ')
     out.append(ANSI.reset())
 
+  fun ref _draw_help_screen(out: String ref) =>
+    let help_lines = recover iso Array[String] end
+    help_lines.push("Colt Text Editor - Help")
+    help_lines.push("")
+    help_lines.push("  NORMAL MODE")
+    help_lines.push("    h/j/k/l       Move cursor")
+    help_lines.push("    w/b/e         Word motions")
+    help_lines.push("    0/^/$         Line motions")
+    help_lines.push("    gg/G/{n}G     File motions")
+    help_lines.push("    f/F/t/T       Find on line")
+    help_lines.push("    ;/,           Repeat find")
+    help_lines.push("")
+    help_lines.push("    i/I/a/A/o/O   Enter insert mode")
+    help_lines.push("    d{motion}     Delete")
+    help_lines.push("    dd            Delete line")
+    help_lines.push("    y{motion}     Yank")
+    help_lines.push("    yy            Yank line")
+    help_lines.push("    c{motion}     Change")
+    help_lines.push("    cc            Change line")
+    help_lines.push("    p/P           Paste after/before")
+    help_lines.push("    u/Ctrl-R      Undo/Redo")
+    help_lines.push("    ~             Toggle case")
+    help_lines.push("    >>/<<         Indent/dedent")
+    help_lines.push("")
+    help_lines.push("  TEXT OBJECTS")
+    help_lines.push("    diw           Delete inner word")
+    help_lines.push("    ci\"           Change inside quotes")
+    help_lines.push("    da(           Delete around parens")
+    help_lines.push("    yi{           Yank inside braces")
+    help_lines.push("    viw           Select inner word")
+    help_lines.push("")
+    help_lines.push("  VISUAL MODE")
+    help_lines.push("    v             Character-wise")
+    help_lines.push("    V             Line-wise")
+    help_lines.push("    d/y/c         Operate on selection")
+    help_lines.push("")
+    help_lines.push("  COMMANDS")
+    help_lines.push("    :w            Save")
+    help_lines.push("    :q/:q!        Quit")
+    help_lines.push("    :wq/:x        Save and quit")
+    help_lines.push("    :e <file>     Open file")
+    help_lines.push("    :s/p/r/[g]    Substitute")
+    help_lines.push("    :%s/p/r/[g]   Substitute all lines")
+    help_lines.push("    :<number>     Go to line")
+    help_lines.push("")
+    help_lines.push("  SETTINGS")
+    help_lines.push("    :set relativenumber    Relative lines")
+    help_lines.push("    :set norelativenumber  Absolute lines")
+    help_lines.push("    :set tabstop=N         Tab width")
+    help_lines.push("    :set shiftwidth=N      Indent width")
+    help_lines.push("    :set expandtab         Spaces for tabs")
+    help_lines.push("")
+    help_lines.push("  REGISTERS")
+    help_lines.push("    \"{letter}      Select register")
+    help_lines.push("    \"{letter}y     Yank to register")
+    help_lines.push("    \"{letter}p     Paste from register")
+    help_lines.push("")
+    help_lines.push("  Press q, Q, or Escape to close help")
+    let lines: Array[String] val = consume help_lines
+
+    var i = _help_offset
+    var row: USize = 0
+    while (row < _rows) and (i < lines.size()) do
+      try
+        let line = lines(i)?
+        out.append(ANSI.cyan())
+        out.append(line)
+        out.append(ANSI.reset())
+        out.append("\x1B[K")
+      else
+        out.append("\x1B[K")
+      end
+      out.append("\r\n")
+      i = i + 1
+      row = row + 1
+    end
+    while row < _rows do
+      out.append("\x1B[K\r\n")
+      row = row + 1
+    end
+
+    out.append("\x1B[7m")
+    out.append(" HELP ")
+    var p: USize = 6
+    while p < _cols do
+      out.push(' ')
+      p = p + 1
+    end
+    out.append(ANSI.reset())
+    out.append("\r\n")
+
+    out.append("\x1B[K")
+    out.append("\r\n")
+
   fun _draw_status_bar(out: String ref) =>
     out.append("\x1B[7m")
 
@@ -2727,6 +2882,7 @@ class Editor
     | ModeSearch => " SEARCH "
     | ModeVisual => " VISUAL "
     | ModeVisualLine => " V-LINE "
+    | ModeHelp => " HELP "
     end
 
     let fname: String val = if _buf.filename.size() > 0 then
