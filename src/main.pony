@@ -23,6 +23,12 @@ actor Main
       @tcsetattr(0, 0, raw.cpointer())
     end
 
+    // Switch to alternate screen buffer (prevents terminal scrollback corruption)
+    ifdef posix then
+      let alt_screen = "\x1B[?1049h"
+      @write(1, alt_screen.cpointer(), alt_screen.size())
+    end
+
     // Enable SGR mouse mode (scroll wheel + click tracking)
     ifdef posix then
       let mouse_on = "\x1B[?1000h\x1B[?1006h"
@@ -56,8 +62,9 @@ actor Main
       @tcsetattr(0, 0, _orig_termios.cpointer())
     end
     ifdef posix then
-      let clear = "\x1B[2J\x1B[H"
-      @write(1, clear.cpointer(), clear.size())
+      // Switch back to main screen buffer and clear
+      let restore = "\x1B[?1049l\x1B[2J\x1B[H"
+      @write(1, restore.cpointer(), restore.size())
     end
     _term.dispose()
     ifdef posix then
