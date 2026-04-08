@@ -88,6 +88,7 @@ class Editor
   var _dot_replaying: Bool = false
   // Syntax highlighting
   var _lang: SyntaxLang = LangNone
+  var _lang_name_str: String = "none"
   var _hl_bc_state: Array[Bool] ref = Array[Bool]  // per-row: in block comment?
 
   new create(env: Env, filename: String, quit_fn: {()} val) =>
@@ -98,6 +99,7 @@ class Editor
     if filename.size() > 0 then
       _buf.load(_auth)
       _lang = SyntaxDetect(filename)
+      _lang_name_str = _detect_lang_name(filename)
       let m = String
       m.append("\"")
       m.append(filename)
@@ -290,6 +292,58 @@ class Editor
     _git_dirty = _buf.dirty
     _git_branch = ""
 
+  fun _detect_lang_name(filename: String box): String =>
+    """Return a human-readable language name from filename."""
+    // Find the last '.'
+    var dot_pos: ISize = -1
+    var i: USize = 0
+    while i < filename.size() do
+      if (try filename(i)? else 0 end) == '.' then
+        dot_pos = i.isize()
+      end
+      i = i + 1
+    end
+    if dot_pos < 0 then
+      let base = filename
+      // Check special filenames
+      if (base == "Makefile") or (base == "makefile") or (base == "GNUmakefile") then
+        return "make"
+      end
+      if (base == "Gemfile") or (base == "Rakefile") or (base == "Vagrantfile") then
+        return "ruby"
+      end
+      return ""
+    end
+    let ext_iso = filename.substring(dot_pos + 1)
+    let ext: String val = consume ext_iso
+    match ext
+    | "c" | "h" => "C"
+    | "cpp" | "cxx" | "cc" | "hpp" | "hxx" => "C++"
+    | "rs" => "Rust"
+    | "py" | "pyw" => "Python"
+    | "go" => "Go"
+    | "zig" => "Zig"
+    | "ha" => "Hare"
+    | "pony" => "Pony"
+    | "java" => "Java"
+    | "js" | "jsx" | "mjs" | "cjs" => "JavaScript"
+    | "ts" | "tsx" | "mts" | "cts" => "TypeScript"
+    | "md" | "markdown" => "Markdown"
+    | "json" | "jsonc" => "JSON"
+    | "yml" | "yaml" => "YAML"
+    | "toml" => "TOML"
+    | "lua" => "Lua"
+    | "rb" | "rake" | "gemspec" => "Ruby"
+    | "html" | "htm" => "HTML"
+    | "css" | "scss" | "less" => "CSS"
+    | "sh" | "bash" | "zsh" | "fish" => "Shell"
+    | "mk" => "Makefile"
+    else ""
+    end
+
+  fun _lang_name(): String =>
+    _lang_name_str
+
   fun ref _show_help() =>
     _mode = ModeHelp
     _help_offset = 0
@@ -478,6 +532,9 @@ class Editor
       count = count + 1
     end
     _clamp_cursor()
+
+  fun _is_digit(ch: U8): Bool =>
+    (ch >= '0') and (ch <= '9')
 
   fun _is_word_char(ch: U8): Bool =>
     ((ch >= 'a') and (ch <= 'z')) or
@@ -1864,6 +1921,12 @@ class Editor
       _undo()
     | 0x12 =>  // Ctrl-R
       _redo()
+    | 0x01 =>  // Ctrl-A: increment number
+      _increment_number(if count > 0 then count else 1 end)
+    | 0x18 =>  // Ctrl-X: decrement number
+      _decrement_number(if count > 0 then count else 1 end)
+    | '%' =>
+      _jump_to_matching_bracket()
     | '~' =>
       if _cur_line_len() > 0 then
         _save_undo()
@@ -2284,6 +2347,7 @@ class Editor
       _buf = Buffer(fname.clone())
       _buf.load(_auth)
       _lang = SyntaxDetect(fname)
+      _lang_name_str = _detect_lang_name(fname)
       _hl_bc_state.clear()
       _cx = 0
       _cy = 0
@@ -2656,6 +2720,126 @@ class Editor
     | '\'' => ('\'', '\'')
     | '`' => ('`', '`')
     else (delim, delim)
+    end
+
+  fun ref _jump_to_matching_bracket() =>
+    """Jump cursor to matching bracket. Works for ()[]{}."""
+    let l = _buf.line(_cy)
+    let len = l.size()
+    if len == 0 then return end
+    if _cx >= len then return end
+
+    let ch = try l(_cx)? else 0 end
+    let open = _get_pair(ch)._1
+    let close = _get_pair(ch)._2
+    var depth: ISize = 1
+    var found = false
+
+    // Determine direction
+    var r: USize = _cy
+    var c: USize = _cx
+    var dir: I8 = 0  // 1 = forward, -1 = backward
+
+    // First try forward from cursor
+    c = _cx + 1
+    r = _cy
+    while r < _buf.line_count() do
+      let ll = _buf.line(r)
+      let llen = ll.size()
+      while c < llen do
+        let cc = try ll(c)? else 0 end
+        if cc == open then depth = depth + 1
+        elseif cc == close then
+          depth = depth - 1
+          if depth == 0 then
+            _cy = r; _cx = c; found = true; break
+          end
+        end
+        c = c + 1
+      end
+      if found then return end
+      r = r + 1
+      c = 0
+    end
+
+    // Try backward from cursor
+    depth = 1
+    r = _cy
+    c = if _cx > 0 then _cx - 1 else 0 end
+    if _cx == 0 then
+      if r > 0 then r = r - 1 else return end
+      c = _buf.line(r).size()
+      if c > 0 then c = c - 1 end
+    end
+
+    while true do
+      let ll = _buf.line(r)
+      let llen = ll.size()
+      while true do
+        let cc = try ll(c)? else 0 end
+        if cc == close then depth = depth + 1
+        elseif cc == open then
+          depth = depth - 1
+          if depth == 0 then
+            _cy = r; _cx = c; return
+          end
+        end
+        if c == 0 then break end
+        c = c - 1
+      end
+      if r == 0 then break end
+      r = r - 1
+      c = _buf.line(r).size()
+      if c > 0 then c = c - 1 end
+    end
+
+  fun ref _increment_number(n: USize) =>
+    _modify_number(n, true)
+
+  fun ref _decrement_number(n: USize) =>
+    _modify_number(n, false)
+
+  fun ref _modify_number(n: USize, up: Bool) =>
+    """Find number under/after cursor and increment/decrement by n."""
+    let l = _buf.line(_cy)
+    let len = l.size()
+    if len == 0 then return end
+
+    // Find number starting at or after cursor
+    var num_start: USize = _cx
+    while num_start < len do
+      if _is_digit(try l(num_start)? else ' ' end) then break end
+      num_start = num_start + 1
+    end
+    if num_start >= len then return end
+
+    // Find end of number
+    var num_end = num_start
+    while num_end < len do
+      if not _is_digit(try l(num_end)? else ' ' end) then break end
+      num_end = num_end + 1
+    end
+
+    let num_str_iso = l.substring(num_start.isize(), num_end.isize())
+    let num_str: String val = consume num_str_iso
+    try
+      let num = num_str.usize()?
+      let new_num = if up then num + n else
+        if num >= n then num - n else 0 end
+      end
+      let new_str_iso = new_num.string()
+      let new_str: String val = consume new_str_iso
+
+      // Replace in line via buffer ref
+      try
+        let rl = _buf.lines(_cy)?
+        rl.delete(num_start.isize(), num_end - num_start)
+        rl.insert(num_start.isize(), new_str)
+        _buf.dirty = true
+      end
+
+      // Move cursor to end of new number
+      _cx = num_start + new_str.size()
     end
 
   fun ref _paste_after() =>
@@ -3151,6 +3335,8 @@ class Editor
     left.append(git_info)
 
     let right = String
+    right.append(" ")
+    right.append(_lang_name())
     right.append(" ")
     right.append((_cy + 1).string())
     right.append("/")
