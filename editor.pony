@@ -2001,7 +2001,10 @@ class Editor
       _mode = ModeNormal
       _cmd_buf.clear()
     | 0x0D | 0x0A =>  // Enter (CR or LF)
-      _execute_command()
+      try _execute_command()?
+      else
+        _set_message("Invalid command")
+      end
       _mode = ModeNormal
     | 0x7F =>
       if _cmd_buf.size() > 0 then
@@ -2052,7 +2055,7 @@ class Editor
 
   // ── Commands ──
 
-  fun ref _execute_command() =>
+  fun ref _execute_command() ? =>
     let cmd: String val = _cmd_buf.clone()
     _cmd_buf.clear()
 
@@ -2099,6 +2102,12 @@ class Editor
         msg.append(" lines")
       end
       _set_message(msg.clone())
+    elseif (cmd.size() > 2) and (cmd(0)? == 's') and (cmd(1)? == '/') then
+      // :s/pat/rep/ or :s/pat/rep/g
+      _substitute(cmd)?
+    elseif (cmd.size() > 3) and _has_substitute(cmd) then
+      // :%s/pat/rep/g or :.,$s/pat/rep/g
+      _substitute(cmd)?
     else
       try
         let line_num = cmd.usize()?
@@ -2138,22 +2147,168 @@ class Editor
       false
     end
 
+  fun _has_substitute(cmd: String box): Bool =>
+    """Check if command contains 's/' pattern (for :%s, :.,$s, etc.)."""
+    var i: USize = 0
+    while i < cmd.size() do
+      if (try cmd(i)? else 0 end) == 's' then
+        if (i + 1) < cmd.size() then
+          if (try cmd(i + 1)? else 0 end) == '/' then return true end
+        end
+      end
+      i = i + 1
+    end
+    false
+
+  fun ref _substitute(cmd: String box) ? =>
+    """
+    Parse and execute substitute command.
+    Supports: :s/pat/rep/, :s/pat/rep/g, :%s/pat/rep/g, :.,$s/pat/rep/g
+    Uses literal string matching (no regex).
+    """
+    // Find the 's/' to get the range prefix
+    var s_pos: USize = 0
+    while s_pos < cmd.size() do
+      if (try cmd(s_pos)? else 0 end) == 's' then break end
+      s_pos = s_pos + 1
+    end
+    if s_pos >= cmd.size() then return end
+
+    // Parse range
+    var start_line: USize = _cy
+    var end_line: USize = _cy
+    var range_set = false
+
+    if s_pos > 0 then
+      let prefix_iso = cmd.substring(0, s_pos.isize())
+      let prefix: String val = consume prefix_iso
+      if prefix == "%" then
+        start_line = 0
+        end_line = _buf.line_count() - 1
+        range_set = true
+      else
+        // Try to parse as line number or . or .,$
+        if prefix == "." then
+          start_line = _cy
+          end_line = _cy
+          range_set = true
+        elseif (prefix.size() > 2) and (prefix(0)? == '.') and (prefix(1)? == ',') then
+          let rest_iso = prefix.substring(2)
+          let rest: String val = consume rest_iso
+          start_line = _cy
+          if rest == "$" then
+            end_line = _buf.line_count() - 1
+          else
+            try
+              end_line = ((rest.usize()?) - 1).min(_buf.line_count() - 1)
+            else
+              _set_message("Invalid range")
+              return
+            end
+          end
+          range_set = true
+        else
+          try
+            let ln = (prefix.usize()?) - 1
+            start_line = ln.min(_buf.line_count() - 1)
+            end_line = start_line
+            range_set = true
+          else
+            _set_message("Invalid range")
+            return
+          end
+        end
+      end
+    end
+
+    if not range_set then
+      start_line = _cy
+      end_line = _cy
+    end
+
+    // Parse s/pat/rep/flags
+    if (s_pos + 1) >= cmd.size() then return end
+    let delim = try cmd(s_pos + 1)? else return end
+
+    // Find pattern end
+    var p_start = s_pos + 2
+    var p_end = p_start
+    while p_end < cmd.size() do
+      if (try cmd(p_end)? else 0 end) == delim then break end
+      p_end = p_end + 1
+    end
+    if p_end >= cmd.size() then return end
+
+    let pat_iso = cmd.substring(p_start.isize(), p_end.isize())
+    let pat: String val = consume pat_iso
+
+    // Find replacement end
+    var r_start = p_end + 1
+    var r_end = r_start
+    while r_end < cmd.size() do
+      if (try cmd(r_end)? else 0 end) == delim then break end
+      r_end = r_end + 1
+    end
+
+    let rep_iso = cmd.substring(r_start.isize(), r_end.isize())
+    let rep: String val = consume rep_iso
+
+    // Parse flags (g for global)
+    var global = false
+    var f_pos = r_end + 1
+    while f_pos < cmd.size() do
+      if (try cmd(f_pos)? else 0 end) == 'g' then global = true end
+      f_pos = f_pos + 1
+    end
+
+    // Execute substitution
+    var total_replaced: USize = 0
+    var r = start_line
+    while r <= end_line.min(_buf.line_count() - 1) do
+      let l = try _buf.lines(r)? else r = r + 1; continue end
+      if pat.size() == 0 then r = r + 1; continue end
+
+      var offset: USize = 0
+      while true do
+        try
+          let idx = l.find(pat where offset = offset.isize())?
+          l.delete(idx, pat.size())
+          l.insert(idx, rep)
+          total_replaced = total_replaced + 1
+          if global then
+            offset = idx.usize() + rep.size()
+            if offset >= l.size() then break end
+          else
+            break
+          end
+        else
+          break
+        end
+      end
+      r = r + 1
+    end
+
+    let msg = String
+    msg.append(total_replaced.string())
+    msg.append(if total_replaced == 1 then " substitution" else " substitutions" end)
+    _set_message(msg.clone())
+    _buf.dirty = true
+
   fun ref _paste_after() =>
     let reg = try _registers(_current_register)? else return end
     let is_line = try _register_is_line(_current_register)? else false end
     if reg.size() == 0 then return end
     if is_line then
       for (i, l) in reg.pairs() do
-        _buf.insert_line(_cy + 1 + i, l.clone())
+        _buf.insert_line(_cy + i, l.clone())
       end
-      _cy = _cy + 1
       _cx = 0
       _move_to_first_nonblank()
     else
       try
         let text = reg(0)?
         let l = _buf.lines(_cy)?
-        var col = _cx + 1
+        var col = _cx
         for ch in text.values() do
           l.insert_byte(col.isize(), ch)
           col = col + 1
