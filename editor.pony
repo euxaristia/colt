@@ -68,6 +68,10 @@ class Editor
   var _pending_textobj: U8 = 0
   var _pending_textop: U8 = 0
   var _pending_textcount: USize = 0
+  // Surround operations
+  var _pending_surround: U8 = 0  // 'd' for ds, 'c' for cs, 'y' for ysi
+  var _pending_surround_old: U8 = 0  // old delimiter for cs
+  var _pending_surround_type: U8 = 0  // 'i' for inner textobj, 'm' for motion
   var _last_find_char: U8 = 0
   var _last_find_dir: I8 = 1
   var _last_find_till: Bool = false
@@ -1514,6 +1518,23 @@ class Editor
       return
     end
 
+    // ── Surround pending ──
+    if _pending_surround != 0 then
+      if _pending_surround == 'c' then
+        // cs needs two chars: old then new
+        if _pending_surround_old == 0 then
+          _pending_surround_old = ch
+          return
+        end
+      end
+      _do_surround(ch)
+      _pending_surround = 0
+      _pending_surround_old = 0
+      _pending_surround_type = 0
+      _count = 0
+      return
+    end
+
     if _pending == 'Z' then
       _pending = 0
       _count = 0
@@ -1599,6 +1620,29 @@ class Editor
 
     // ── Operator pending ──
     if _operator != 0 then
+      // Check for surround sub-command: ds, cs, ys
+      if (ch == 's') and ((_operator == 'd') or (_operator == 'c') or (_operator == 'y')) then
+        match _operator
+        | 'd' =>
+          _operator = 0
+          _pending_surround = 'd'
+          _pending_surround_type = 'i'
+          _count = 0
+          return
+        | 'c' =>
+          _operator = 0
+          _pending_surround = 'c'
+          _pending_surround_type = 'i'
+          _count = 0
+          return
+        | 'y' =>
+          _operator = 0
+          _pending_surround = 'y'
+          _pending_surround_type = 'm'
+          _count = 0
+          return
+        end
+      end
       let op = _operator
       _operator = 0
       let oc = _op_count
@@ -1896,14 +1940,79 @@ class Editor
     | 0x0D | 0x0A =>  // Enter (CR or LF)
       _insert_newline()
     | 0x7F =>  // Backspace (DEL)
-      _delete_char_before()
+      _auto_delete_pair_before()
     | 0x08 =>  // Backspace (BS)
-      _delete_char_before()
+      _auto_delete_pair_before()
     | 0x09 =>  // Tab
       _insert_char('\t')
+    | '(' => _auto_insert_pair('(', ')')
+    | '[' => _auto_insert_pair('[', ']')
+    | '{' => _auto_insert_pair('{', '}')
+    | '"' => _auto_insert_pair('"', '"')
+    | '\'' => _auto_insert_pair('\'', '\'')
     | if (ch >= 0x20) and (ch < 0x7F) =>
-      _insert_char(ch)
+      // Auto-skip: if ch matches next char, skip over it
+      if _auto_skip_char(ch) then
+        _cx = _cx + 1
+      else
+        _insert_char(ch)
+      end
     end
+
+  fun ref _auto_insert_pair(open: U8, close: U8) =>
+    """Insert open+close pair and place cursor between them."""
+    try
+      let l = _buf.lines(_cy)?
+      let pair = recover iso String(2) end
+      pair.push(open)
+      pair.push(close)
+      let p: String val = consume pair
+      l.insert(_cx.isize(), p)
+      _buf.dirty = true
+      _cx = _cx + 1
+    end
+
+  fun ref _auto_skip_char(ch: U8): Bool =>
+    """If next char matches ch, skip over it. Returns true if skipped."""
+    try
+      let l = _buf.lines(_cy)?
+      if _cx < l.size() then
+        if (try l(_cx)? else 0 end) == ch then
+          return true
+        end
+      end
+    end
+    false
+
+  fun ref _auto_delete_pair_before() =>
+    """
+    If char before cursor is open-pair and char at cursor is matching close-pair,
+    delete both. Otherwise delete single char.
+    """
+    if _cx > 0 then
+      try
+        let l = _buf.lines(_cy)?
+        if _cx < l.size() then
+          let before = try l(_cx - 1)? else ' ' end
+          let after = try l(_cx)? else ' ' end
+          let matched = match before
+          | '(' => after == ')'
+          | '[' => after == ']'
+          | '{' => after == '}'
+          | '"' => after == '"'
+          | '\'' => after == '\''
+          else false
+          end
+          if matched then
+            l.delete((_cx - 1).isize(), 2)
+            _buf.dirty = true
+            return
+          end
+        end
+      end
+    end
+    // Fall back to normal delete
+    _delete_char_before()
 
   // ── Key handling: Visual mode ──
 
@@ -2415,6 +2524,139 @@ class Editor
     msg.append(if total_replaced == 1 then " substitution" else " substitutions" end)
     _set_message(msg.clone())
     _buf.dirty = true
+
+  fun ref _do_surround(ch: U8) =>
+    """Execute surround operation."""
+    match _pending_surround
+    | 'd' => _delete_surrounding(ch)
+    | 'c' => _change_surrounding(_pending_surround_old, ch)
+    | 'y' => None
+    else None
+    end
+
+  fun ref _delete_surrounding(delim: U8) =>
+    let open = _get_pair(delim)._1
+    let close = _get_pair(delim)._2
+    var open_row: USize = 0
+    var open_col: USize = 0
+    var found = false
+    var r: USize = _cy
+    while true do
+      let l = _buf.line(r)
+      let len = l.size()
+      var c: USize = len
+      if len > 0 then c = len - 1 end
+      if (r == _cy) and (_cx < len) then c = _cx end
+      while true do
+        if (try l(c)? else 0 end) == open then
+          open_row = r; open_col = c; found = true; break
+        end
+        if c == 0 then break end
+        c = c - 1
+      end
+      if found then break end
+      if r == 0 then break end
+      r = r - 1
+    end
+    if not found then return end
+
+    var close_col: USize = 0
+    var close_row: USize = 0
+    var found_close = false
+    r = open_row
+    while r < _buf.line_count() do
+      let l = _buf.line(r)
+      let len = l.size()
+      var c: USize = if r == open_row then open_col + 1 else 0 end
+      while c < len do
+        if (try l(c)? else 0 end) == close then
+          close_row = r; close_col = c; found_close = true; break
+        end
+        c = c + 1
+      end
+      if found_close then break end
+      r = r + 1
+    end
+    if not found_close then return end
+
+    _save_undo()
+    try
+      let first = _buf.lines(open_row)?
+      first.delete(open_col.isize(), 1)
+      let last = _buf.lines(close_row)?
+      last.delete(close_col.isize(), 1)
+      _buf.dirty = true
+    end
+
+  fun ref _change_surrounding(old: U8, nw: U8) =>
+    let old_open = _get_pair(old)._1
+    let old_close = _get_pair(old)._2
+    let new_open = _get_pair(nw)._1
+    let new_close = _get_pair(nw)._2
+    var open_col: USize = 0
+    var open_row: USize = 0
+    var found = false
+    var r: USize = _cy
+    while true do
+      let l = _buf.line(r)
+      let len = l.size()
+      var c: USize = len
+      if len > 0 then c = len - 1 end
+      if (r == _cy) and (_cx < len) then c = _cx end
+      while true do
+        if (try l(c)? else 0 end) == old_open then
+          open_row = r; open_col = c; found = true; break
+        end
+        if c == 0 then break end
+        c = c - 1
+      end
+      if found then break end
+      if r == 0 then break end
+      r = r - 1
+    end
+    if not found then return end
+
+    var close_col: USize = 0
+    var close_row: USize = 0
+    var found_close = false
+    r = open_row
+    while r < _buf.line_count() do
+      let l = _buf.line(r)
+      let len = l.size()
+      var c: USize = if r == open_row then open_col + 1 else 0 end
+      while c < len do
+        if (try l(c)? else 0 end) == old_close then
+          close_row = r; close_col = c; found_close = true; break
+        end
+        c = c + 1
+      end
+      if found_close then break end
+      r = r + 1
+    end
+    if not found_close then return end
+
+    _save_undo()
+    try
+      _buf.lines(open_row)?.update(open_col, new_open)?
+      _buf.lines(close_row)?.update(close_col, new_close)?
+      _buf.dirty = true
+    end
+
+  fun _get_pair(delim: U8): (U8, U8) =>
+    match delim
+    | '(' => ('(', ')')
+    | ')' => ('(', ')')
+    | '[' => ('[', ']')
+    | ']' => ('[', ']')
+    | '{' => ('{', '}')
+    | '}' => ('{', '}')
+    | '<' => ('<', '>')
+    | '>' => ('<', '>')
+    | '"' => ('"', '"')
+    | '\'' => ('\'', '\'')
+    | '`' => ('`', '`')
+    else (delim, delim)
+    end
 
   fun ref _paste_after() =>
     let reg = try _registers(_current_register)? else return end
