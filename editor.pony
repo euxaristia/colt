@@ -34,6 +34,11 @@ class Editor
   var _msg_transient: Bool = false
   var _yank_lines: Array[String] ref = Array[String]
   var _yank_is_line: Bool = false
+  // Registers: 0-9 digits, a-z letters, unnamed (0), clipboard
+  var _registers: Array[Array[String] ref] ref = Array[Array[String] ref].init(recover iso Array[String] end, 27)
+  var _register_is_line: Array[Bool] ref = Array[Bool].init(false, 27)
+  // 0=unnamed, 1-26=a-z
+  var _current_register: USize = 0
   var _count: USize = 0
   var _pending: U8 = 0
   var _quitting: Bool = false
@@ -49,6 +54,7 @@ class Editor
   var _op_count: USize = 0
   // f/F/t/T
   var _pending_find: U8 = 0
+  var _pending_register: Bool = false
   // Text objects (i/a + w/"'/(/)/{/}/[/]/<)
   var _pending_textobj: U8 = 0
   var _pending_textop: U8 = 0
@@ -821,37 +827,52 @@ class Editor
   // ── Yank range ──
 
   fun ref _yank_range(sx: USize, sy: USize, ex: USize, ey: USize, is_line: Bool) =>
-    _yank_lines.clear()
+    let reg = try _registers(_current_register)? else return end
+    reg.clear()
+    try _register_is_line(_current_register)? = is_line end
+
     if is_line then
       var r = sy
       while r <= ey.min(_buf.line_count() - 1) do
-        _yank_lines.push(_buf.line(r).clone())
+        reg.push(_buf.line(r).clone())
         r = r + 1
       end
-      _yank_is_line = true
     else
       if sy == ey then
         let l = _buf.line(sy)
         let from = sx.min(l.size())
         let to = (ex + 1).min(l.size())
-        _yank_lines.push(l.substring(from.isize(), to.isize()).clone())
-        _yank_is_line = false
+        reg.push(l.substring(from.isize(), to.isize()).clone())
       else
         // First line from sx to end
         let fl = _buf.line(sy)
-        _yank_lines.push(fl.substring(sx.isize()).clone())
+        reg.push(fl.substring(sx.isize()).clone())
         // Middle lines
         var r = sy + 1
         while r < ey do
-          _yank_lines.push(_buf.line(r).clone())
+          reg.push(_buf.line(r).clone())
           r = r + 1
         end
         // Last line from start to ex
         let ll = _buf.line(ey)
-        _yank_lines.push(ll.substring(0, (ex + 1).isize()).clone())
-        _yank_is_line = false
+        reg.push(ll.substring(0, (ex + 1).isize()).clone())
       end
     end
+
+    // Also copy to unnamed register (0) if not already using it
+    if _current_register != 0 then
+      let unreg = try _registers(0)? else return end
+      unreg.clear()
+      try _register_is_line(0)? = is_line end
+      for ln in reg.values() do
+        unreg.push(ln.clone())
+      end
+    end
+
+    // Update legacy _yank_lines for compatibility with _execute_text_object
+    _yank_lines.clear()
+    for ln in reg.values() do _yank_lines.push(ln.clone()) end
+    _yank_is_line = is_line
 
   // ── Execute motion (returns true if motion was recognized) ──
 
@@ -1468,6 +1489,23 @@ class Editor
       return
     end
 
+    // ── Register prefix (" waiting for register letter) ──
+    if _pending_register then
+      _pending_register = false
+      if (ch >= 'a') and (ch <= 'z') then
+        _current_register = ((ch - 'a') + 1).usize()
+      else
+        _current_register = 0
+      end
+      _count = 0
+      return
+    end
+
+    // Reset register after use (at top of dispatch, before any command)
+    // No — we reset it AFTER the command consumes it.
+    // Actually, we'll reset it right here after the next key processes.
+    // The register is already set, so just let the next key use it.
+
     // ── Text object pending (i/a waiting for object key) ──
     if _pending_textobj != 0 then
       let which = _pending_textobj
@@ -1645,6 +1683,9 @@ class Editor
       _pending = 'Z'
       return
     // Operators
+    | '"' =>
+      _pending_register = true
+      return
     | 'd' =>
       _operator = 'd'
       _op_count = count
@@ -1744,6 +1785,9 @@ class Editor
     | 'N' =>
       _search_next(not _search_dir)
     end
+
+    // Reset register selection after each command
+    _current_register = 0
 
   // ── Key handling: Insert mode ──
 
@@ -2095,9 +2139,11 @@ class Editor
     end
 
   fun ref _paste_after() =>
-    if _yank_lines.size() == 0 then return end
-    if _yank_is_line then
-      for (i, l) in _yank_lines.pairs() do
+    let reg = try _registers(_current_register)? else return end
+    let is_line = try _register_is_line(_current_register)? else false end
+    if reg.size() == 0 then return end
+    if is_line then
+      for (i, l) in reg.pairs() do
         _buf.insert_line(_cy + 1 + i, l.clone())
       end
       _cy = _cy + 1
@@ -2105,7 +2151,7 @@ class Editor
       _move_to_first_nonblank()
     else
       try
-        let text = _yank_lines(0)?
+        let text = reg(0)?
         let l = _buf.lines(_cy)?
         var col = _cx + 1
         for ch in text.values() do
@@ -2118,16 +2164,18 @@ class Editor
     end
 
   fun ref _paste_before() =>
-    if _yank_lines.size() == 0 then return end
-    if _yank_is_line then
-      for (i, l) in _yank_lines.pairs() do
+    let reg = try _registers(_current_register)? else return end
+    let is_line = try _register_is_line(_current_register)? else false end
+    if reg.size() == 0 then return end
+    if is_line then
+      for (i, l) in reg.pairs() do
         _buf.insert_line(_cy + i, l.clone())
       end
       _cx = 0
       _move_to_first_nonblank()
     else
       try
-        let text = _yank_lines(0)?
+        let text = reg(0)?
         let l = _buf.lines(_cy)?
         var col = _cx
         for ch in text.values() do
