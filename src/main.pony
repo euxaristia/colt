@@ -1,6 +1,5 @@
 use "term"
 use "files"
-use "time"
 
 use @tcgetattr[I32](fd: I32, termios: Pointer[U8] tag) if posix
 use @tcsetattr[I32](fd: I32, action: I32, termios: Pointer[U8] tag) if posix
@@ -45,8 +44,7 @@ actor Main
       recover iso MouseInputNotify(term, editor) end,
       512)
 
-    // Start the periodic timer
-    editor.start_timer()
+    // Initial render (TimerRender.create renders immediately)
 
   be quit() =>
     // Disable mouse mode
@@ -76,16 +74,8 @@ actor TimerRender
     let self_tag: TimerRender tag = this
     _editor = Editor(env, filename, {() => self_tag.quit() })
     _main = main
-
-  be start_timer() =>
-    let t: Timer iso = Timer(recover iso RenderTimerNotify(this) end, 1_000_000_000, 1_000_000_000)
-    let timers = Timers
-    timers(consume t)
-
-  be render_only() =>
-    if not _quit and not _editor.is_quitting() then
-      _editor.render()
-    end
+    // Initial render
+    _editor.render()
 
   be quit() =>
     _quit = true
@@ -184,19 +174,6 @@ class EditorNotify is ANSINotify
     _editor.set_size(rows.usize(), cols.usize())
 
   fun ref closed() =>
-    None
-
-class RenderTimerNotify is TimerNotify
-  let _actor: TimerRender tag
-
-  new iso create(editor_actor: TimerRender tag) =>
-    _actor = editor_actor
-
-  fun ref apply(timer: Timer ref, count: U64): Bool =>
-    _actor.render_only()
-    true
-
-  fun ref final(timer: Timer ref) =>
     None
 
 class MouseInputNotify is InputNotify
