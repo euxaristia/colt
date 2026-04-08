@@ -465,7 +465,7 @@ class Editor
 
   fun ref _repeat_find_char(reverse: Bool) =>
     if _last_find_char == 0 then
-      _set_message("No previous search")
+      _set_message("No previous f/t char")
       return
     end
     let dir: I8 = if reverse then -_last_find_dir else _last_find_dir end
@@ -825,7 +825,6 @@ class Editor
 
   fun ref _search_next(forward: Bool) =>
     if _search_buf.size() == 0 then
-      _set_message("No previous search")
       return
     end
     let start_row = _cy
@@ -1343,7 +1342,7 @@ class Editor
       if _cx > 0 then _cx = _cx - 1 end
       _clamp_cursor()
       _dot_stop()
-    | 0x0D =>  // Enter
+    | 0x0D | 0x0A =>  // Enter (CR or LF)
       _insert_newline()
     | 0x7F =>  // Backspace (DEL)
       _delete_char_before()
@@ -1521,7 +1520,7 @@ class Editor
     | 0x03 =>
       _mode = ModeNormal
       _cmd_buf.clear()
-    | 0x0D =>
+    | 0x0D | 0x0A =>  // Enter (CR or LF)
       _execute_command()
       _mode = ModeNormal
     | 0x7F =>
@@ -1550,7 +1549,7 @@ class Editor
     | 0x03 =>
       _mode = ModeNormal
       _search_buf.clear()
-    | 0x0D =>
+    | 0x0D | 0x0A =>  // Enter (CR or LF)
       _mode = ModeNormal
       if _search_buf.size() > 0 then
         _search_next(_search_dir)

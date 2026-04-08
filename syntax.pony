@@ -392,6 +392,145 @@ primitive LangMakefile is SyntaxLang
   fun is_type(word: String box): Bool => false
 
 
+primitive LangJavaScript is SyntaxLang
+  fun line_comment(): String => "//"
+  fun block_comment_start(): String => "/*"
+  fun block_comment_end(): String => "*/"
+  fun is_keyword(word: String box): Bool =>
+    match word
+    | "async" | "await" | "break" | "case" | "catch" | "class" | "const"
+    | "continue" | "debugger" | "default" | "delete" | "do" | "else"
+    | "export" | "extends" | "finally" | "for" | "from" | "function" | "if"
+    | "import" | "in" | "instanceof" | "let" | "new" | "of" | "return"
+    | "static" | "super" | "switch" | "this" | "throw" | "try" | "typeof"
+    | "var" | "void" | "while" | "with" | "yield" => true
+    else false end
+  fun is_type(word: String box): Bool =>
+    match word
+    | "Array" | "Boolean" | "Date" | "Error" | "Function" | "JSON" | "Map"
+    | "Math" | "Number" | "Object" | "Promise" | "Proxy" | "RegExp" | "Set"
+    | "String" | "Symbol" | "WeakMap" | "WeakSet" | "console" | "document"
+    | "window" | "null" | "undefined" | "true" | "false" | "NaN"
+    | "Infinity" => true
+    else false end
+
+primitive LangTypeScript is SyntaxLang
+  fun line_comment(): String => "//"
+  fun block_comment_start(): String => "/*"
+  fun block_comment_end(): String => "*/"
+  fun is_keyword(word: String box): Bool =>
+    match word
+    | "abstract" | "as" | "async" | "await" | "break" | "case" | "catch"
+    | "class" | "const" | "continue" | "debugger" | "declare" | "default"
+    | "delete" | "do" | "else" | "enum" | "export" | "extends" | "finally"
+    | "for" | "from" | "function" | "if" | "implements" | "import" | "in"
+    | "instanceof" | "interface" | "is" | "keyof" | "let" | "module"
+    | "namespace" | "new" | "of" | "override" | "readonly" | "return"
+    | "satisfies" | "static" | "super" | "switch" | "this" | "throw" | "try"
+    | "type" | "typeof" | "var" | "void" | "while" | "with" | "yield" => true
+    else false end
+  fun is_type(word: String box): Bool =>
+    match word
+    | "any" | "boolean" | "never" | "number" | "object" | "string" | "symbol"
+    | "unknown" | "void" | "bigint" | "Array" | "Map" | "Set" | "Promise"
+    | "Record" | "Partial" | "Required" | "Readonly" | "Pick" | "Omit"
+    | "null" | "undefined" | "true" | "false" => true
+    else false end
+
+primitive LangMarkdown is SyntaxLang
+  fun line_comment(): String => ""
+  fun block_comment_start(): String => ""
+  fun block_comment_end(): String => ""
+  fun is_keyword(word: String box): Bool => false
+  fun is_type(word: String box): Bool => false
+
+primitive LangJSON is SyntaxLang
+  fun line_comment(): String => ""
+  fun block_comment_start(): String => ""
+  fun block_comment_end(): String => ""
+  fun is_keyword(word: String box): Bool =>
+    match word
+    | "true" | "false" | "null" => true
+    else false end
+  fun is_type(word: String box): Bool => false
+
+primitive LangYAML is SyntaxLang
+  fun line_comment(): String => "#"
+  fun block_comment_start(): String => ""
+  fun block_comment_end(): String => ""
+  fun is_keyword(word: String box): Bool =>
+    match word
+    | "true" | "false" | "null" | "yes" | "no" | "on" | "off" => true
+    else false end
+  fun is_type(word: String box): Bool => false
+
+primitive LangTOML is SyntaxLang
+  fun line_comment(): String => "#"
+  fun block_comment_start(): String => ""
+  fun block_comment_end(): String => ""
+  fun is_keyword(word: String box): Bool =>
+    match word
+    | "true" | "false" => true
+    else false end
+  fun is_type(word: String box): Bool => false
+
+primitive LangLua is SyntaxLang
+  fun line_comment(): String => "--"
+  fun block_comment_start(): String => "--[["
+  fun block_comment_end(): String => "]]"
+  fun is_keyword(word: String box): Bool =>
+    match word
+    | "and" | "break" | "do" | "else" | "elseif" | "end" | "for"
+    | "function" | "goto" | "if" | "in" | "local" | "not" | "or" | "repeat"
+    | "return" | "then" | "until" | "while" => true
+    else false end
+  fun is_type(word: String box): Bool =>
+    match word
+    | "nil" | "true" | "false" | "self" | "string" | "table" | "math"
+    | "io" | "os" | "coroutine" | "debug" | "package" => true
+    else false end
+
+primitive LangRuby is SyntaxLang
+  fun line_comment(): String => "#"
+  fun block_comment_start(): String => "=begin"
+  fun block_comment_end(): String => "=end"
+  fun is_keyword(word: String box): Bool =>
+    match word
+    | "alias" | "and" | "begin" | "break" | "case" | "class" | "def"
+    | "defined" | "do" | "else" | "elsif" | "end" | "ensure" | "for" | "if"
+    | "in" | "module" | "next" | "not" | "or" | "redo" | "rescue" | "retry"
+    | "return" | "super" | "then" | "undef" | "unless" | "until" | "when"
+    | "while" | "yield" | "require" | "include" | "extend" | "attr_reader"
+    | "attr_writer" | "attr_accessor" | "raise" => true
+    else false end
+  fun is_type(word: String box): Bool =>
+    match word
+    | "nil" | "true" | "false" | "self" | "Array" | "Hash" | "String"
+    | "Integer" | "Float" | "Symbol" | "Proc" | "Lambda" | "IO" | "File"
+    | "Dir" | "Regexp" | "Range" | "Struct" | "Class" | "Module"
+    | "Kernel" => true
+    else false end
+
+primitive LangHTML is SyntaxLang
+  fun line_comment(): String => ""
+  fun block_comment_start(): String => "<!--"
+  fun block_comment_end(): String => "-->"
+  fun is_keyword(word: String box): Bool => false
+  fun is_type(word: String box): Bool => false
+
+primitive LangCSS is SyntaxLang
+  fun line_comment(): String => ""
+  fun block_comment_start(): String => "/*"
+  fun block_comment_end(): String => "*/"
+  fun is_keyword(word: String box): Bool =>
+    match word
+    | "important" | "inherit" | "initial" | "unset" | "revert" | "auto"
+    | "none" | "block" | "inline" | "flex" | "grid" | "absolute" | "relative"
+    | "fixed" | "sticky" | "static" | "hidden" | "visible" | "scroll"
+    | "solid" | "dashed" | "dotted" | "transparent" => true
+    else false end
+  fun is_type(word: String box): Bool => false
+
 primitive SyntaxDetect
   """Detect language from filename extension."""
   fun apply(filename: String box): SyntaxLang =>
@@ -405,10 +544,18 @@ primitive SyntaxDetect
       i = i + 1
     end
 
-    // Check for Makefile (no extension)
+    // Check for special filenames (no extension)
     let base = _basename(filename)
     if (base == "Makefile") or (base == "makefile") or (base == "GNUmakefile") then
       return LangMakefile
+    end
+    if (base == "Gemfile") or (base == "Rakefile") or (base == "Vagrantfile") then
+      return LangRuby
+    end
+    if (base == ".bashrc") or (base == ".bash_profile") or (base == ".profile")
+      or (base == ".zshrc") or (base == ".zshenv")
+    then
+      return LangShell
     end
 
     if dot_pos < 0 then return LangNone end
@@ -426,6 +573,16 @@ primitive SyntaxDetect
     | "java" => LangJava
     | "sh" | "bash" | "zsh" | "fish" => LangShell
     | "mk" => LangMakefile
+    | "js" | "jsx" | "mjs" | "cjs" => LangJavaScript
+    | "ts" | "tsx" | "mts" | "cts" => LangTypeScript
+    | "md" | "markdown" => LangMarkdown
+    | "json" | "jsonc" => LangJSON
+    | "yml" | "yaml" => LangYAML
+    | "toml" => LangTOML
+    | "lua" => LangLua
+    | "rb" | "rake" | "gemspec" => LangRuby
+    | "html" | "htm" | "svg" | "xml" => LangHTML
+    | "css" | "scss" | "less" => LangCSS
     else LangNone end
 
   fun _basename(path: String box): String val =>
