@@ -49,6 +49,10 @@ class Editor
   var _op_count: USize = 0
   // f/F/t/T
   var _pending_find: U8 = 0
+  // Text objects (i/a + w/"'/(/)/{/}/[/]/<)
+  var _pending_textobj: U8 = 0
+  var _pending_textop: U8 = 0
+  var _pending_textcount: USize = 0
   var _last_find_char: U8 = 0
   var _last_find_dir: I8 = 1
   var _last_find_till: Bool = false
@@ -429,6 +433,293 @@ class Editor
     ((ch >= '0') and (ch <= '9')) or
     (ch == '_')
 
+  // ── Text Object Finding ──
+
+  fun _find_text_object(which: U8, ch: U8): (USize, USize, USize, USize) =>
+    """
+    Find text object range. Returns (sx, sy, ex, ey).
+    which: 'i' (inner) or 'a' (around)
+    ch: w, ", ', (, ), {, }, B, [, ], <, >
+    """
+    match ch
+    | 'w' => _find_word_object(which)
+    | '"' => _find_quote_object(which, '"')
+    | '\'' => _find_quote_object(which, '\'')
+    | '(' | ')' => _find_bracket_object(which, '(', ')')
+    | '{' | '}' | 'B' => _find_bracket_object(which, '{', '}')
+    | '[' | ']' => _find_bracket_object(which, '[', ']')
+    | '<' | '>' => _find_bracket_object(which, '<', '>')
+    else (_cx, _cy, _cx, _cy)
+    end
+
+  fun _find_word_object(which: U8): (USize, USize, USize, USize) =>
+    let l = _buf.line(_cy)
+    let len = l.size()
+    if len == 0 then return (_cx, _cy, _cx, _cy) end
+
+    var ws: USize = 0
+    var we: USize = 0
+    var found = false
+
+    // If cursor is on a word, find its boundaries
+    if (_cx < len) and _is_word_char(try l(_cx)? else ' ' end) then
+      ws = _cx
+      while ws > 0 do
+        if not _is_word_char(try l(ws - 1)? else ' ' end) then break end
+        ws = ws - 1
+      end
+      we = _cx
+      while (we + 1) < len do
+        if not _is_word_char(try l(we + 1)? else ' ' end) then break end
+        we = we + 1
+      end
+      found = true
+    else
+      // Cursor not on a word, find next word
+      ws = _cx
+      while (ws < len) and (not _is_word_char(try l(ws)? else ' ' end)) do
+        ws = ws + 1
+      end
+      if ws < len then
+        we = ws
+        while (we + 1) < len do
+          if not _is_word_char(try l(we + 1)? else ' ' end) then break end
+          we = we + 1
+        end
+        found = true
+      end
+    end
+
+    if not found then return (_cx, _cy, _cx, _cy) end
+
+    if which == 'a' then
+      // Include surrounding whitespace
+      var asx = ws
+      while asx > 0 do
+        let prev = try l(asx - 1)? else ' ' end
+        if (prev == ' ') or (prev == '\t') then asx = asx - 1 else break end
+      end
+      var aex = we
+      while (aex + 1) < len do
+        let next = try l(aex + 1)? else ' ' end
+        if (next == ' ') or (next == '\t') then aex = aex + 1 else break end
+      end
+      ws = asx
+      we = aex
+    end
+
+    (ws, _cy, we, _cy)
+
+  fun _find_quote_object(which: U8, quote: U8): (USize, USize, USize, USize) =>
+    let l = _buf.line(_cy)
+    let len = l.size()
+    if len == 0 then return (_cx, _cy, _cx, _cy) end
+
+    // Search backward from cursor for opening quote (skip if cursor is on quote)
+    var open_pos: USize = 0
+    var found_open = false
+    var i = if _cx < len then _cx else len - 1 end
+    while true do
+      let ch = try l(i)? else 0 end
+      if ch == quote then
+        // Check not escaped
+        var escaped = false
+        if i > 0 then
+          var ei: ISize = i.isize() - 1
+          while ei >= 0 do
+            if (try l(ei.usize())? else 0 end) != '\\' then break end
+            escaped = not escaped
+            ei = ei - 1
+          end
+        end
+        if not escaped then
+          open_pos = i
+          found_open = true
+          break
+        end
+      end
+      if i == 0 then break end
+      i = i - 1
+    end
+
+    if not found_open then return (_cx, _cy, _cx, _cy) end
+
+    // Search forward for closing quote
+    var close_pos: USize = 0
+    var found_close = false
+    var j = open_pos + 1
+    while j < len do
+      let ch = try l(j)? else 0 end
+      if ch == quote then
+        var escaped = false
+        if j > 0 then
+          var ei: ISize = j.isize() - 1
+          while ei >= 0 do
+            if (try l(ei.usize())? else 0 end) != '\\' then break end
+            escaped = not escaped
+            ei = ei - 1
+          end
+        end
+        if not escaped then
+          close_pos = j
+          found_close = true
+          break
+        end
+      end
+      j = j + 1
+    end
+
+    if not found_close then return (_cx, _cy, _cx, _cy) end
+
+    if which == 'a' then
+      (open_pos, _cy, close_pos, _cy)
+    else
+      // Inner: between quotes
+      let cs = open_pos + 1
+      let ce = if close_pos > cs then close_pos - 1 else cs end
+      (cs, _cy, ce, _cy)
+    end
+
+  fun _find_bracket_object(which: U8, open: U8, close: U8): (USize, USize, USize, USize) =>
+    // Search backward for opening bracket, tracking nesting
+    var open_row: USize = 0
+    var open_col: USize = 0
+    var found_open = false
+    var depth: ISize = 0
+
+    var r = _cy
+    while true do
+      let l = _buf.line(r)
+      let len = l.size()
+      var c: USize = len
+      if len > 0 then c = len - 1 end
+      if (r == _cy) and (_cx < len) then c = _cx end
+
+      while true do
+        let ch = try l(c)? else 0 end
+        if ch == close then
+          depth = depth + 1
+        elseif ch == open then
+          if depth == 0 then
+            open_row = r
+            open_col = c
+            found_open = true
+            break
+          end
+          depth = depth - 1
+        end
+        if c == 0 then break end
+        c = c - 1
+      end
+      if found_open then break end
+      if r == 0 then break end
+      r = r - 1
+    end
+
+    if not found_open then return (_cx, _cy, _cx, _cy) end
+
+    // Search forward for matching closing bracket
+    var close_row: USize = 0
+    var close_col: USize = 0
+    var found_close = false
+    depth = 0
+
+    var r2 = open_row
+    while r2 < _buf.line_count() do
+      let l = _buf.line(r2)
+      let len = l.size()
+      var c2: USize = if r2 == open_row then open_col + 1 else 0 end
+
+      while c2 < len do
+        let ch = try l(c2)? else 0 end
+        if ch == open then
+          depth = depth + 1
+        elseif ch == close then
+          if depth == 0 then
+            close_row = r2
+            close_col = c2
+            found_close = true
+            break
+          end
+          depth = depth - 1
+        end
+        c2 = c2 + 1
+      end
+      if found_close then break end
+      r2 = r2 + 1
+    end
+
+    if not found_close then return (_cx, _cy, _cx, _cy) end
+
+    if open_row == close_row then
+      // Single line
+      let l = _buf.line(open_row)
+      if which == 'a' then
+        (open_col, open_row, close_col, close_row)
+      else
+        // Inner: skip whitespace
+        var sx = open_col + 1
+        var ex = if close_col > sx then close_col - 1 else sx end
+        while sx <= ex do
+          let ch = try l(sx)? else ' ' end
+          if (ch == ' ') or (ch == '\t') then sx = sx + 1 else break end
+        end
+        while ex >= sx do
+          let ch = try l(ex)? else ' ' end
+          if (ch == ' ') or (ch == '\t') then
+            if ex == 0 then break end
+            ex = ex - 1
+          else break end
+        end
+        if sx > ex then
+          (open_col + 1, open_row, open_col + 1, open_row)
+        else
+          (sx, open_row, ex, close_row)
+        end
+      end
+    else
+      // Multi-line
+      if which == 'a' then
+        (open_col, open_row, close_col, close_row)
+      else
+        // Inner: content between brackets
+        var sx = open_col + 1
+        var sy = open_row
+        var ex = close_col
+        var ey = close_row
+
+        // Skip leading whitespace on first line
+        let first = _buf.line(open_row)
+        while sx < first.size() do
+          let ch = try first(sx)? else ' ' end
+          if (ch == ' ') or (ch == '\t') then sx = sx + 1 else break end
+        end
+        // If first line is all ws, start at next line
+        if (sx >= first.size()) and ((open_row + 1) <= close_row) then
+          sy = open_row + 1
+          sx = 0
+        end
+
+        // Skip trailing whitespace on last line
+        let last = _buf.line(close_row)
+        while ex > 0 do
+          let ch = try last(ex - 1)? else ' ' end
+          if (ch == ' ') or (ch == '\t') then ex = ex - 1 else break end
+        end
+        // If last line is all ws, end at previous line
+        if (ex == 0) and (close_row > sy) then
+          ey = close_row - 1
+          ex = _buf.line_len(ey)
+        end
+
+        if sy > ey then
+          (open_col + 1, open_row, open_col + 1, open_row)
+        else
+          (sx, sy, ex, ey)
+        end
+      end
+    end
+
   // ── f/F/t/T ──
 
   fun ref _find_char_on_line(ch: U8, dir: I8, till: Bool): Bool =>
@@ -598,6 +889,111 @@ class Editor
 
   fun _is_linewise_motion(ch: U8): Bool =>
     (ch == 'j') or (ch == 'k') or (ch == 'G')
+
+  // ── Text Object Execution ──
+
+  fun ref _execute_text_object(which: U8, ch: U8, op: U8, count: USize) =>
+    """
+    Execute operator on text object.
+    which: 'i' (inner) or 'a' (around)
+    ch: w, ", ', (, ), {, }, B, [, ], <, >
+    op: d, y, c, >, <
+    """
+    (let sx, let sy, let ex, let ey) = _find_text_object(which, ch)
+    // If range is degenerate (find failed), cancel
+    if (sx == _cx) and (sy == _cy) and (ex == _cx) and (ey == _cy) then
+      let l = _buf.line(_cy)
+      if l.size() == 0 then return end
+      // Check if we're actually at the failed position
+      // (cursor wasn't on a text object)
+      return
+    end
+
+    let is_line = (sy != ey) or (which == 'a')
+
+    match op
+    | 'd' =>
+      _save_undo()
+      _yank_range(sx, sy, ex, ey, is_line)
+      if is_line then
+        var i = ey
+        while i >= sy do
+          if _buf.line_count() > 1 then
+            _buf.delete_line(i)
+          else
+            try _buf.lines(i)?.clear() end
+            _buf.dirty = true
+          end
+          if i == 0 then break end
+          i = i - 1
+        end
+        if _buf.line_count() == 0 then _buf.lines.push(String) end
+      else
+        _buf.delete_range(sy, sx, ey, ex)
+      end
+      _cy = sy
+      _cx = sx
+      _clamp_cursor()
+      _dot_stop()
+    | 'y' =>
+      _yank_range(sx, sy, ex, ey, is_line)
+      _dot_stop()
+      let n_lines = (ey - sy) + 1
+      if n_lines > 1 then
+        let msg = String
+        msg.append(n_lines.string())
+        msg.append(" lines yanked")
+        _set_message(msg.clone())
+      end
+    | 'c' =>
+      _save_undo()
+      _yank_range(sx, sy, ex, ey, is_line)
+      if is_line then
+        var i = ey
+        while i >= sy do
+          if _buf.line_count() > 1 then
+            _buf.delete_line(i)
+          else
+            try _buf.lines(i)?.clear() end
+            _buf.dirty = true
+          end
+          if i == 0 then break end
+          i = i - 1
+        end
+        if _buf.line_count() == 0 then _buf.lines.push(String) end
+        _buf.insert_line(sy, "")
+        _cy = sy
+        _cx = 0
+      else
+        _buf.delete_range(sy, sx, ey, ex)
+        _cy = sy
+        _cx = sx
+      end
+      _clamp_cursor()
+      _mode = ModeInsert
+    | '>' =>
+      _save_undo()
+      if sy == ey then
+        _buf.indent_lines(sy, ey)
+      else
+        _buf.indent_lines(sy, ey)
+      end
+      _cy = sy
+      _cx = sx
+      _clamp_cursor()
+      _dot_stop()
+    | '<' =>
+      _save_undo()
+      if sy == ey then
+        _buf.outdent_lines(sy, ey)
+      else
+        _buf.outdent_lines(sy, ey)
+      end
+      _cy = sy
+      _cx = sx
+      _clamp_cursor()
+      _dot_stop()
+    end
 
   // ── Operator handling ──
 
@@ -1072,12 +1468,34 @@ class Editor
       return
     end
 
+    // ── Text object pending (i/a waiting for object key) ──
+    if _pending_textobj != 0 then
+      let which = _pending_textobj
+      _pending_textobj = 0
+      let op = _pending_textop
+      _pending_textop = 0
+      let cnt = _pending_textcount
+      _pending_textcount = 0
+      _dot_record(ch)
+      _execute_text_object(which, ch, op, cnt)
+      _count = 0
+      return
+    end
+
     // ── Operator pending ──
     if _operator != 0 then
       let op = _operator
       _operator = 0
       let oc = _op_count
       _op_count = 0
+      // Check for text object prefix
+      if (ch == 'i') or (ch == 'a') then
+        _pending_textobj = ch
+        _pending_textop = op
+        _pending_textcount = oc
+        _count = 0
+        return
+      end
       // Use the larger of operator count and motion count
       let mc = if count > 1 then count else oc end
       _dot_record(ch)
@@ -1370,6 +1788,17 @@ class Editor
     let count = if _count > 0 then _count else 1 end
     _count = 0
 
+    // Text object pending
+    if _pending_textobj != 0 then
+      let which = _pending_textobj
+      _pending_textobj = 0
+      (let sx, let sy, let ex, let ey) = _find_text_object(which, ch)
+      _sel_sx = sx; _sel_sy = sy
+      _cx = ex; _cy = ey
+      _clamp_cursor()
+      return
+    end
+
     match ch
     | 0x1B =>  // Escape
       _mode = ModeNormal
@@ -1393,6 +1822,13 @@ class Editor
     | 'g' =>
       _pending = 'g'
       _count = count
+      return
+    // Text objects
+    | 'i' =>
+      _pending_textobj = 'i'
+      return
+    | 'a' =>
+      _pending_textobj = 'a'
       return
     // Toggle visual modes
     | 'v' =>
