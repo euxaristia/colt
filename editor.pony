@@ -35,10 +35,11 @@ class Editor
   var _msg_transient: Bool = false
   var _yank_lines: Array[String] ref = Array[String]
   var _yank_is_line: Bool = false
-  // Registers: 0-9 digits, a-z letters, unnamed (0), clipboard
-  var _registers: Array[Array[String] ref] ref = Array[Array[String] ref].init(recover iso Array[String] end, 27)
-  var _register_is_line: Array[Bool] ref = Array[Bool].init(false, 27)
-  // 0=unnamed, 1-26=a-z
+  // Registers: 0-9 numbered, a-z named, unnamed
+  // 0=unnamed, 1-9=numbered (auto-history), 10-35=a-z
+  var _registers: Array[Array[String] ref] ref = Array[Array[String] ref].init(recover iso Array[String] end, 36)
+  var _register_is_line: Array[Bool] ref = Array[Bool].init(false, 36)
+  // 0=unnamed
   var _current_register: USize = 0
   var _count: USize = 0
   var _pending: U8 = 0
@@ -282,6 +283,31 @@ class Editor
     _message = msg
     _msg_time = _now_seconds()
     _msg_transient = transient
+
+  fun ref _push_delete_register(content: Array[String] ref, is_line: Bool) =>
+    """Shift numbered delete registers: "8→"9, "7→"8, ... "1→"2, new→"1."""
+    var i: USize = 9
+    while i > 1 do
+      let src_idx = i - 1
+      let dst_idx = i
+      try
+        let src = _registers(src_idx)?
+        let dst = _registers(dst_idx)?
+        dst.clear()
+        for ln in src.values() do dst.push(ln.clone()) end
+        let il = try _register_is_line(src_idx)? else false end
+        try _register_is_line(dst_idx)? = il end
+      end
+      if i == 0 then break end
+      i = i - 1
+    end
+    // Put new content in "1 (our idx 2)
+    try
+      let reg1 = _registers(2)?
+      reg1.clear()
+      try _register_is_line(2)? = is_line end
+      for ln in content.values() do reg1.push(ln.clone()) end
+    end
 
   fun ref _check_git_dirty(filename: String box) =>
     """
@@ -996,6 +1022,18 @@ class Editor
       end
     end
 
+    // Auto-populate numbered register "0 (our idx 1) on yanks
+    if _current_register == 0 then
+      try
+        let num0 = _registers(1)?
+        num0.clear()
+        try _register_is_line(1)? = is_line end
+        for ln in reg.values() do
+          num0.push(ln.clone())
+        end
+      end
+    end
+
     // Update legacy _yank_lines for compatibility with _execute_text_object
     _yank_lines.clear()
     for ln in reg.values() do _yank_lines.push(ln.clone()) end
@@ -1063,6 +1101,7 @@ class Editor
     | 'd' =>
       _save_undo()
       _yank_range(sx, sy, ex, ey, is_line)
+      _push_delete_register(_yank_lines, _yank_is_line)
       if is_line then
         var i = ey
         while i >= sy do
@@ -1096,6 +1135,7 @@ class Editor
     | 'c' =>
       _save_undo()
       _yank_range(sx, sy, ex, ey, is_line)
+      _push_delete_register(_yank_lines, _yank_is_line)
       if is_line then
         var i = ey
         while i >= sy do
@@ -1260,6 +1300,7 @@ class Editor
     | 'd' =>
       _save_undo()
       _yank_range(r_sx, r_sy, r_ex, r_ey, is_line)
+      _push_delete_register(_yank_lines, _yank_is_line)
       if is_line then
         var i = r_ey
         while i >= r_sy do
@@ -1294,6 +1335,7 @@ class Editor
     | 'c' =>
       _save_undo()
       _yank_range(r_sx, r_sy, r_ex, r_ey, is_line)
+      _push_delete_register(_yank_lines, _yank_is_line)
       if is_line then
         var i = r_ey
         while i >= r_sy do
@@ -1644,11 +1686,13 @@ class Editor
       return
     end
 
-    // ── Register prefix (" waiting for register letter) ──
+    // ── Register prefix (" waiting for register) ──
     if _pending_register then
       _pending_register = false
-      if (ch >= 'a') and (ch <= 'z') then
-        _current_register = ((ch - 'a') + 1).usize()
+      if (ch >= '0') and (ch <= '9') then
+        _current_register = ((ch - '0') + 1).usize()
+      elseif (ch >= 'a') and (ch <= 'z') then
+        _current_register = ((ch - 'a') + 11).usize()
       else
         _current_register = 0
       end
@@ -2156,6 +2200,7 @@ class Editor
       let is_line = match _mode | ModeVisualLine => true else false end
       _save_undo()
       _yank_range(sx, sy, ex, ey, is_line)
+      _push_delete_register(_yank_lines, _yank_is_line)
       if is_line then
         var i = ey
         while i >= sy do
@@ -2188,6 +2233,7 @@ class Editor
       let is_line = match _mode | ModeVisualLine => true else false end
       _save_undo()
       _yank_range(sx, sy, ex, ey, is_line)
+      _push_delete_register(_yank_lines, _yank_is_line)
       if is_line then
         var i = ey
         while i >= sy do
