@@ -1,0 +1,183 @@
+.TH COLT 1 "April 2026" "colt" "User Commands"
+.SH NAME
+colt \- a vi-style modal terminal text editor
+.SH SYNOPSIS
+.B colt
+.RI [ filename ]
+.SH DESCRIPTION
+.B colt
+is a modal terminal text editor written in Pony. It uses vi/vim-style
+keybindings with modal editing (Normal, Insert, Visual, Command, Search).
+.PP
+When started with a filename, colt loads the file into the buffer.
+Without a filename, it opens an empty buffer.
+.SH MODES
+.TP
+.B Normal
+Default mode for navigation and commands. Press
+.B Escape
+from Insert mode to return here.
+.TP
+.B Insert
+Text entry mode. Enter with
+.BR i ,
+.BR a ,
+.BR o ,
+.B I ,
+.BR A ,
+.BR O .
+Exit with
+.BR Escape .
+.TP
+.B Command
+Ex-style command entry. Enter with
+.BR : .
+.TP
+.B Search
+Search entry. Enter with
+.B /
+or
+.BR ? .
+.TP
+.B Visual
+Character-wise visual selection. Enter with
+.BR v .
+.TP
+.B Visual Line
+Line-wise visual selection. Enter with
+.BR V .
+.SH KEY BINDINGS
+.SS Normal Mode
+.TP
+.B h / j / k / l
+Move cursor left / down / up / right
+.TP
+.B w / b / e
+Word forward / word backward / word end
+.TP
+.B 0 / ^ / $
+Line start / first non-blank / line end
+.TP
+.B gg / G / {n}G
+File start / file end / line number
+.TP
+.B f / F / t / T
+Find character on line (forward/backward, to/at)
+.TP
+.B ; / ,
+Repeat last find (same/reverse direction)
+.TP
+.B i / I / a / A / o / O
+Enter Insert mode (various positions)
+.TP
+.B d{motion}
+Delete (motion form, e.g.
+.BR dd ,
+.BR dw ,
+.B d$ )
+.TP
+.B y{motion}
+Yank (e.g.
+.BR yy ,
+.BR yw )
+.TP
+.B c{motion}
+Change (delete and enter Insert)
+.TP
+.B p / P
+Paste after / before cursor
+.TP
+.B u / Ctrl-R
+Undo / Redo
+.TP
+.B %
+Jump to matching bracket
+.TP
+.B Ctrl-A / Ctrl-X
+Increment / decrement number
+.TP
+.B ~
+Toggle case
+.TP
+.B > / <
+Indent / dedent
+.TP
+.B "a-{letter}
+Select register for next operation
+.SS Text Objects
+.TP
+.B diw
+Delete inner word
+.TP
+.B ci"
+Change inside quotes
+.TP
+.B da(
+Delete around parentheses
+.TP
+.B yi{
+Yank inside braces
+.SS Visual Mode
+.TP
+.B v
+Toggle character-wise visual
+.TP
+.B V
+Toggle line-wise visual
+.TP
+.B d / y / c
+Delete / yank / change selection
+.SS Command Mode
+.TP
+.B :w
+Save
+.TP
+.B :q / :q!
+Quit / force quit
+.TP
+.B :wq / :x
+Save and quit
+.TP
+.B :e {file}
+Open file
+.TP
+.B :s/pat/rep/[g]
+Substitute (literal string, g for global)
+.TP
+.B :%s/pat/rep/[g]
+Substitute across all lines
+.TP
+.B :{n}
+Go to line number
+.TP
+.B :set relativenumber
+Toggle relative line numbers
+.TP
+.B :set tabstop={n}
+Set tab width
+.TP
+.B :help
+Show help screen
+.SS Registers
+.TP
+.B "0
+Last yanked text (auto)
+.TP
+.B "1-"9
+Last 9 deletions (auto-shift)
+.TP
+.B "a-"z
+Named registers
+.TP
+.B "+
+System clipboard (via xclip/pbcopy)
+.SH FILES
+.TP
+.B /tmp/colt_clipboard
+Temporary file used for clipboard operations.
+.SH ENVIRONMENT
+No special environment variables are used.
+.SH SEE ALSO
+.BR vim (1)
+.SH AUTHOR
+Public domain. See the UNLICENSE file.

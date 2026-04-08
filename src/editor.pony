@@ -3,6 +3,7 @@ use "files"
 use "time"
 
 use @write[ISize](fd: I32, buffer: Pointer[U8] tag, size: USize) if posix
+use @system[I32](command: Pointer[U8] tag) if posix
 
 primitive ModeNormal
 primitive ModeInsert
@@ -52,6 +53,9 @@ class Editor
   // Git dirty state
   var _git_dirty: Bool = false
   var _git_branch: String = ""
+  // Clipboard: last yanked text synced to system clipboard
+  var _clipboard_lines: Array[String] ref = Array[String]
+  var _clipboard_is_line: Bool = false
   // Help mode
   var _help_offset: USize = 0
   // Undo / redo
@@ -307,6 +311,93 @@ class Editor
       reg1.clear()
       try _register_is_line(2)? = is_line end
       for ln in content.values() do reg1.push(ln.clone()) end
+    end
+
+  fun ref _sync_clipboard() =>
+    """Copy the unnamed register (idx 0) to the system clipboard."""
+    let reg = try _registers(0)? else return end
+    if reg.size() == 0 then return end
+    ifdef posix then
+      let content = recover iso String end
+      for (i, ln) in reg.pairs() do
+        if i > 0 then content.push('\n') end
+        content.append(ln)
+      end
+      if try _register_is_line(0)? else false end then content.push('\n') end
+      let text: String val = consume content
+      let tmp_path = "/tmp/colt_clipboard"
+      // Write to temp file
+      let wcmd = recover iso String end
+      wcmd.append("printf '%s' '")
+      var ci: USize = 0
+      while ci < text.size() do
+        let ch = try text(ci)? else ' ' end
+        if ch == '\'' then wcmd.append("'\\''")
+        elseif ch == '\\' then wcmd.append("\\\\")
+        else wcmd.push(ch) end
+        ci = ci + 1
+      end
+      wcmd.append("' > ")
+      wcmd.append(tmp_path)
+      let wcmd_val: String val = consume wcmd
+      @system(wcmd_val.cpointer())
+      // Copy to clipboard
+      ifdef linux then
+        let xcb_cmd = recover iso String end
+        xcb_cmd.append("xclip -selection clipboard < ")
+        xcb_cmd.append(tmp_path)
+        xcb_cmd.append(" 2>/dev/null || true")
+        @system((consume xcb_cmd).cpointer())
+      else
+        let pb_cmd = recover iso String end
+        pb_cmd.append("cat ")
+        pb_cmd.append(tmp_path)
+        pb_cmd.append(" | pbcopy 2>/dev/null || true")
+        @system((consume pb_cmd).cpointer())
+      end
+      // Also store locally
+      _clipboard_lines.clear()
+      for ln in reg.values() do _clipboard_lines.push(ln.clone()) end
+      try _clipboard_is_line = _register_is_line(0)? end
+    end
+
+  fun ref _read_clipboard() =>
+    """Read system clipboard into the unnamed register."""
+    ifdef posix then
+      let tmp_path = "/tmp/colt_clipboard"
+      ifdef linux then
+        let cmd = recover iso String end
+        cmd.append("xclip -selection clipboard -o > ")
+        cmd.append(tmp_path)
+        cmd.append(" 2>/dev/null || true")
+        @system((consume cmd).cpointer())
+      else
+        let cmd = recover iso String end
+        cmd.append("pbpaste > ")
+        cmd.append(tmp_path)
+        cmd.append(" 2>/dev/null || true")
+        @system((consume cmd).cpointer())
+      end
+      // Read back the file
+      try
+        let path = FilePath(_auth, tmp_path)
+        match OpenFile(path)
+        | let f: File =>
+          _clipboard_lines.clear()
+          for file_line in f.lines() do
+            _clipboard_lines.push(file_line.string().clone())
+          end
+          f.dispose()
+          if _clipboard_lines.size() > 0 then
+            _clipboard_is_line = true
+            // Also update unnamed register
+            let unreg = _registers(0)?
+            unreg.clear()
+            for ln in _clipboard_lines.values() do unreg.push(ln.clone()) end
+            try _register_is_line(0)? = true end
+          end
+        end
+      end
     end
 
   fun ref _check_git_dirty(filename: String box) =>
@@ -1034,6 +1125,9 @@ class Editor
       end
     end
 
+    // Sync to system clipboard on every yank
+    _sync_clipboard()
+
     // Update legacy _yank_lines for compatibility with _execute_text_object
     _yank_lines.clear()
     for ln in reg.values() do _yank_lines.push(ln.clone()) end
@@ -1689,7 +1783,11 @@ class Editor
     // ── Register prefix (" waiting for register) ──
     if _pending_register then
       _pending_register = false
-      if (ch >= '0') and (ch <= '9') then
+      if ch == '+' then
+        // System clipboard register
+        _current_register = 0
+        _read_clipboard()
+      elseif (ch >= '0') and (ch <= '9') then
         _current_register = ((ch - '0') + 1).usize()
       elseif (ch >= 'a') and (ch <= 'z') then
         _current_register = ((ch - 'a') + 11).usize()
