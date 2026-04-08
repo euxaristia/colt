@@ -1,1 +1,1 @@
-../buffer.pony
+../src/buffer.pony

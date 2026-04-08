@@ -1,5 +1,5 @@
 CC = cc
-SOURCES = main.pony editor.pony buffer.pony syntax.pony
+SOURCES = src/main.pony src/editor.pony src/buffer.pony src/syntax.pony
 TARGET = colt
 TEST_SOURCES = tests/tests.pony tests/buffer.pony tests/syntax.pony
 TEST_TARGET = colt-tests
@@ -9,13 +9,14 @@ TEST_TARGET = colt-tests
 all: $(TARGET)
 
 $(TARGET): $(SOURCES)
-	ponyc -o . --linker=$(CC)
+	cd src && ponyc -o .. -b $(TARGET) --linker=$(CC)
 
 $(TEST_TARGET): $(TEST_SOURCES)
 	cd tests && ponyc -o . --linker=$(CC)
 
 clean:
-	rm -f $(TARGET) $(TARGET).o tests/$(TEST_TARGET) tests/$(TEST_TARGET).o
+	rm -f $(TARGET) tests/$(TEST_TARGET)
+	rm -f colt.o tests/$(TEST_TARGET).o
 
 install: $(TARGET)
 	install -m 755 $(TARGET) ~/.local/bin/

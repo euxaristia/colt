@@ -1,1 +1,1 @@
-../syntax.pony
+../src/syntax.pony

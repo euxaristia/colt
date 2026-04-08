@@ -2036,12 +2036,10 @@ class Editor
     match ch
     | 0x1B =>  // Escape
       _mode = ModeNormal
-      if _cx > 0 then _cx = _cx - 1 end
       _clamp_cursor()
       _dot_stop()
     | 0x03 =>  // Ctrl-C
       _mode = ModeNormal
-      if _cx > 0 then _cx = _cx - 1 end
       _clamp_cursor()
       _dot_stop()
     | 0x0D | 0x0A =>  // Enter (CR or LF)

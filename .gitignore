@@ -2,3 +2,7 @@ Colt
 colt
 *.o
 .qwen/
+tests/tests
+tests/tests.o
+tests/colt-tests
+tests/colt-tests.o
