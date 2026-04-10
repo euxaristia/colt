@@ -6,6 +6,20 @@ use @write[ISize](fd: I32, buffer: Pointer[U8] tag, size: USize) if posix
 use @system[I32](command: Pointer[U8] tag) if posix
 
 primitive ModeNormal
+
+primitive WelcomeLines
+  fun apply(): Array[String val] =>
+    [
+      "colt v0.1.0"
+      ""
+      "colt is open source and freely distributable"
+      "https://github.com/euxaristia/colt"
+      ""
+      "type  :q<Enter>               to exit         "
+      "type  :wq<Enter>              save and exit   "
+      ""
+      "Maintainer: euxaristia"
+    ]
 primitive ModeInsert
 primitive ModeCommand
 primitive ModeSearch
@@ -2163,7 +2177,12 @@ class Editor
     | '(' => _auto_insert_pair('(', ')')
     | '[' => _auto_insert_pair('[', ']')
     | '{' => _auto_insert_pair('{', '}')
-    | '"' => _auto_insert_pair('"', '"')
+    | '"' =>
+      if _auto_skip_char('"') then
+        _cx = _cx + 1
+      else
+        _insert_char('"')
+      end
     | '\'' => _auto_insert_pair('\'', '\'')
     | if (ch >= 0x20) and (ch < 0x7F) =>
       // Auto-skip: if ch matches next char, skip over it
@@ -3198,10 +3217,30 @@ class Editor
         out.append(ANSI.grey())
         out.push('~')
         let gc = _gutter_cols()
+        let tc = _text_cols()
         var g: USize = 0
         while g < gc do
           out.push(' ')
           g = g + 1
+        end
+        if (_buf.filename.size() == 0) and (_buf.line_count() <= 1)
+          and (screen_row >= (_rows / 3))
+          and (screen_row < ((_rows / 3) + WelcomeLines().size()))
+        then
+          let lines = WelcomeLines()
+          try
+            let msg = lines(screen_row - (_rows / 3))?
+            let extra: USize = if tc > msg.size() then tc - msg.size() else 0 end
+            let padding: USize = extra / 2
+            g = gc
+            while g < (gc + padding) do
+              out.push(' ')
+              g = g + 1
+            end
+            let remaining: USize = tc - padding
+            let display_len: USize = msg.size().min(remaining)
+            out.append(msg.substring(0, display_len.isize()))
+          end
         end
         out.append(ANSI.reset())
       end

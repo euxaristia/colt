@@ -19,7 +19,12 @@ clean:
 	rm -f colt.o tests/$(TEST_TARGET).o
 
 install: $(TARGET)
-	install -m 755 $(TARGET) ~/.local/bin/
+	@if [ -f ~/.local/bin/$(TARGET) ] && [ "$$(sha256sum $(TARGET) | cut -d' ' -f1)" = "$$(sha256sum ~/.local/bin/$(TARGET) | cut -d' ' -f1)" ]; then \
+		echo "$(TARGET) is already installed and up to date."; \
+	else \
+		install -m 755 $(TARGET) ~/.local/bin/; \
+		echo "$(TARGET) installed to ~/.local/bin/"; \
+	fi
 
 uninstall:
 	rm -f ~/.local/bin/$(TARGET)
