@@ -2632,7 +2632,7 @@ class Editor
     """
     Parse and execute substitute command.
     Supports: :s/pat/rep/, :s/pat/rep/g, :%s/pat/rep/g, :.,$s/pat/rep/g
-    Uses literal string matching (no regex).
+    Uses regex patterns (see regex.pony for supported syntax).
     """
     // Find the 's/' to get the range prefix
     var s_pos: USize = 0
@@ -2729,23 +2729,39 @@ class Editor
       f_pos = f_pos + 1
     end
 
+    // Compile regex
+    if pat.size() == 0 then
+      _set_message("Empty pattern")
+      return
+    end
+    let re = try
+      ReCompile(pat)?
+    else
+      _set_message("Invalid regex")
+      return
+    end
+
     // Execute substitution
     var total_replaced: USize = 0
     var r = start_line
     while r <= end_line.min(_buf.line_count() - 1) do
       let l = try _buf.lines(r)? else r = r + 1; continue end
-      if pat.size() == 0 then r = r + 1; continue end
 
       var offset: USize = 0
       while true do
         try
-          let idx = l.find(pat where offset = offset.isize())?
-          l.delete(idx, pat.size())
-          l.insert(idx, rep)
+          (let m_start, let m_end) = re.find(l, offset)?
+          let match_iso = l.substring(m_start.isize(), m_end.isize())
+          let matched: String val = consume match_iso
+          let expanded: String val = ReReplace(rep, matched)
+          l.delete(m_start.isize(), m_end - m_start)
+          l.insert(m_start.isize(), expanded)
           total_replaced = total_replaced + 1
           if global then
-            offset = idx.usize() + rep.size()
-            if offset >= l.size() then break end
+            // Advance past the replacement; if match was zero-width, step by 1
+            offset = m_start + expanded.size()
+            if (m_end == m_start) then offset = offset + 1 end
+            if offset > l.size() then break end
           else
             break
           end

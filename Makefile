@@ -1,5 +1,5 @@
 CC = cc
-SOURCES = src/main.pony src/editor.pony src/buffer.pony src/syntax.pony
+SOURCES = src/main.pony src/editor.pony src/buffer.pony src/syntax.pony src/regex.pony
 TARGET = colt
 TEST_SOURCES = tests/tests.pony tests/buffer.pony tests/syntax.pony
 TEST_TARGET = colt-tests
