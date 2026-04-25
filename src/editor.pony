@@ -434,14 +434,58 @@ class Editor
       end
     end
 
-  fun ref _check_git_dirty(filename: String box) =>
-    """
-    Track dirty state from buffer. In a full implementation this would
-    call git status via Process API, but since that's async in Pony,
-    we conservatively use buffer dirty state as the indicator.
-    """
-    _git_dirty = _buf.dirty
-    _git_branch = ""
+  fun ref _check_git_dirty(filename: String) =>
+    """Read git branch from .git/HEAD and dirty state from git status."""
+    if filename.size() == 0 then return end
+    var dir_path: String = Path.dir(filename)
+    while dir_path.size() > 0 do
+      let head_path = Path.join(dir_path, ".git/HEAD")
+      let path = FilePath(_auth, head_path)
+      match OpenFile(path)
+      | let f: File =>
+        let content: String = f.read_string(1024)
+        f.dispose()
+        // Strip trailing newline if present
+        var cleaned: String = content
+        try
+          if (cleaned.size() > 0) and (cleaned(cleaned.size() - 1)? == '\n') then
+            cleaned = cleaned.substring(0, cleaned.size().isize() - 1)
+          end
+        end
+        // Parse branch: "ref: refs/heads/main" → "main"
+        if (cleaned.size() > 5) and (cleaned.substring(0, 5) == "ref: ") then
+          let rest: String = cleaned.substring(5)
+          try
+            let slash = rest.rfind("/")?
+            if slash >= 0 then
+              _git_branch = rest.substring((slash + 1).isize())
+            end
+          end
+        elseif cleaned.size() >= 7 then
+          _git_branch = cleaned.substring(0, 7)
+        end
+        // Check dirty via git status
+        ifdef posix then
+          let cmd = recover iso String end
+          cmd.append("cd ")
+          cmd.append(dir_path)
+          cmd.append(" && git status --porcelain > /tmp/colt_git_status 2>/dev/null")
+          let cmd_val: String val = consume cmd
+          @system(cmd_val.cpointer())
+        end
+        let sp = FilePath(_auth, "/tmp/colt_git_status")
+        match OpenFile(sp)
+        | let sf: File =>
+          let sc = sf.read_string(16)
+          sf.dispose()
+          _git_dirty = sc.size() > 0
+        end
+        return
+      end
+      let parent = Path.dir(dir_path)
+      if (parent.size() == 0) or (parent == dir_path) then break end
+      dir_path = parent
+    end
 
   fun _detect_lang_name(filename: String box): String =>
     """Return a human-readable language name from filename."""
@@ -489,7 +533,7 @@ class Editor
     | "css" | "scss" | "less" => "CSS"
     | "sh" | "bash" | "zsh" | "fish" => "Shell"
     | "mk" => "Makefile"
-    else ""
+    else "none"
     end
 
   fun _lang_name(): String =>
