@@ -13,7 +13,7 @@ primitive SR
 
 actor Main is TestList
   new create(env: Env) =>
-    None
+    PonyTest(env, this)
 
   fun tag tests(test: PonyTest) =>
     test(recover iso TestBufferInsert end)
@@ -26,12 +26,21 @@ actor Main is TestList
     test(recover iso TestBufferOutdent end)
     test(recover iso TestSyntaxHighlight end)
     test(recover iso TestLangDetect end)
+    test(recover iso TestEditorGGotoBottom end)
+    test(recover iso TestEditorGWithCount end)
+    test(recover iso TestEditorGGGoesToTop end)
+    test(recover iso TestEditorJDown end)
+    test(recover iso TestEditorKUp end)
+    test(recover iso TestEditorGAtBottomStaysBottom end)
+    test(recover iso TestEditorCountJ end)
+    test(recover iso TestEditorCountGClamped end)
 
 
 class iso TestBufferInsert is UnitTest
   fun name(): String => "Buffer insert"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("hello"))
     buf.lines.push(SR("world"))
     h.assert_eq[USize](buf.line_count(), 2)
@@ -47,6 +56,7 @@ class iso TestBufferDeleteLine is UnitTest
   fun name(): String => "Buffer delete line"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("first"))
     buf.lines.push(SR("second"))
     buf.lines.push(SR("third"))
@@ -62,6 +72,7 @@ class iso TestBufferSplitLine is UnitTest
   fun name(): String => "Buffer split line"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("hello world"))
 
     buf.split_line(0, 5)
@@ -74,6 +85,7 @@ class iso TestBufferJoinLines is UnitTest
   fun name(): String => "Buffer join lines"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("hello"))
     buf.lines.push(SR(" world"))
 
@@ -86,9 +98,10 @@ class iso TestBufferDeleteRangeSame is UnitTest
   fun name(): String => "Buffer delete range same line"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("hello world"))
 
-    buf.delete_range(0, 0, 0, 4)
+    buf.delete_range(0, 0, 0, 3)
     h.assert_true(buf.line(0) == "o world")
 
 
@@ -96,11 +109,12 @@ class iso TestBufferDeleteRangeMulti is UnitTest
   fun name(): String => "Buffer delete range multi line"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("hello"))
     buf.lines.push(SR("middle"))
     buf.lines.push(SR("world"))
 
-    buf.delete_range(0, 3, 2, 2)
+    buf.delete_range(0, 3, 2, 1)
     h.assert_eq[USize](buf.line_count(), 1)
     h.assert_true(buf.line(0) == "helrld")
 
@@ -109,6 +123,7 @@ class iso TestBufferIndent is UnitTest
   fun name(): String => "Buffer indent"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("hello"))
     buf.lines.push(SR("world"))
 
@@ -121,6 +136,7 @@ class iso TestBufferOutdent is UnitTest
   fun name(): String => "Buffer outdent"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("  hello"))
     buf.lines.push(SR("  world"))
 

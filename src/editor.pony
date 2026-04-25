@@ -236,6 +236,14 @@ class Editor
     end
     rx
 
+  // ── Public accessors ──
+
+  fun cursor_y(): USize => _cy
+
+  fun cursor_x(): USize => _cx
+
+  fun ref buf(): Buffer => _buf
+
   // ── Helpers ──
 
   fun _now_seconds(): U64 =>
@@ -1904,8 +1912,8 @@ class Editor
     | 'b' => _move_word_backward(count)
     | 'e' => _move_word_end(count)
     | 'G' =>
-      if _count > 0 then
-        _cy = (_buf.line_count() - 1).min(_count - 1)
+      if count > 1 then
+        _cy = (_buf.line_count() - 1).min(count - 1)
       else
         _cy = _buf.line_count() - 1
       end
