@@ -1904,8 +1904,8 @@ class Editor
     | 'b' => _move_word_backward(count)
     | 'e' => _move_word_end(count)
     | 'G' =>
-      if count > 0 then
-        _cy = (_buf.line_count() - 1).min(count - 1)
+      if _count > 0 then
+        _cy = (_buf.line_count() - 1).min(_count - 1)
       else
         _cy = _buf.line_count() - 1
       end
