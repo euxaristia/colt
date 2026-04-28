@@ -3538,19 +3538,30 @@ class Editor
     right.append((_cx + 1).string())
     right.append(" ")
 
-    let padding = if _cols > (left.size() + right.size()) then
-      _cols - left.size() - right.size()
+    // Fit `left` + padding + `right` into exactly `_cols` cells. If the two
+    // sides together exceed `_cols`, drop the right side first, then truncate
+    // left. Overflowing past `_cols` would wrap to a second terminal row,
+    // which scrolls the screen and shifts the cursor off the target line.
+    if (left.size() + right.size()) <= _cols then
+      out.append(left)
+      var p: USize = 0
+      let padding = _cols - left.size() - right.size()
+      while p < padding do
+        out.push(' ')
+        p = p + 1
+      end
+      out.append(right)
+    elseif left.size() <= _cols then
+      out.append(left)
+      var p: USize = 0
+      let padding = _cols - left.size()
+      while p < padding do
+        out.push(' ')
+        p = p + 1
+      end
     else
-      0
+      out.append(left.substring(0, _cols.isize()))
     end
-
-    out.append(left)
-    var p: USize = 0
-    while p < padding do
-      out.push(' ')
-      p = p + 1
-    end
-    out.append(right)
     out.append("\x1B[m")
 
   fun _draw_command_line(out: String ref) =>
