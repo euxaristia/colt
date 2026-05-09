@@ -32,8 +32,12 @@ class val Regex
     var pos = start
     let n = s.size()
     if _anchored then
-      let r = _match_from(0, s, pos)
-      if r._1 then return (pos, r._2) end
+      // ^ binds to the start of the input only. Calls with start > 0
+      // (e.g. successive iterations of :s/^a/b/g) must fail to match,
+      // otherwise ^ would silently behave like an unanchored pattern.
+      if pos > 0 then error end
+      let r = _match_from(0, s, 0)
+      if r._1 then return (0, r._2) end
       error
     end
     while pos <= n do
@@ -56,6 +60,8 @@ class val Regex
       if not _atom_matches(atom, s, si + count) then break end
       count = count + 1
     end
+    // If we didn't reach qmin, the atom can't satisfy this position.
+    if count < atom.qmin then return (false, 0) end
     // Backtrack down to qmin
     while true do
       let sub = _match_from(ai + 1, s, si + count)
@@ -119,20 +125,49 @@ primitive ReCompile
         end
         let rsb = recover trn Array[(U8, U8)] end
         while (i < n) and (pattern(i)? != ']') do
-          let lo_pair = _class_char(pattern, i)?
-          let lo_b = lo_pair._1
-          var hi_b = lo_b
-          var j = lo_pair._2
-          if (j < n) and (pattern(j)? == '-')
-            and ((j + 1) < n) and (pattern(j + 1)? != ']')
-          then
-            j = j + 1
-            let hi_pair = _class_char(pattern, j)?
-            hi_b = hi_pair._1
-            j = hi_pair._2
+          var consumed_meta = false
+          // \d, \w, \s expand to their positive ranges here so e.g.
+          // [\dA-F] matches hex digits. \D / \W / \S aren't supported
+          // inside a class — their negation isn't expressible as a
+          // simple range list — and fall through to literal-char.
+          if (pattern(i)? == '\\') and ((i + 1) < n) then
+            let e = pattern(i + 1)?
+            if e == 'd' then
+              rsb.push(('0', '9'))
+              i = i + 2
+              consumed_meta = true
+            elseif e == 'w' then
+              rsb.push(('a', 'z'))
+              rsb.push(('A', 'Z'))
+              rsb.push(('0', '9'))
+              rsb.push(('_', '_'))
+              i = i + 2
+              consumed_meta = true
+            elseif e == 's' then
+              rsb.push((' ', ' '))
+              rsb.push(('\t', '\t'))
+              rsb.push(('\n', '\n'))
+              rsb.push(('\r', '\r'))
+              i = i + 2
+              consumed_meta = true
+            end
           end
-          rsb.push((lo_b, hi_b))
-          i = j
+          if not consumed_meta then
+            let lo_pair = _class_char(pattern, i)?
+            let lo_b = lo_pair._1
+            var hi_b = lo_b
+            var j = lo_pair._2
+            if (j < n) and (pattern(j)? == '-')
+              and ((j + 1) < n) and (pattern(j + 1)? != ']')
+            then
+              j = j + 1
+              let hi_pair = _class_char(pattern, j)?
+              hi_b = hi_pair._1
+              j = hi_pair._2
+            end
+            rsb.push((lo_b, hi_b))
+            i = j
+          end
         end
         if i >= n then error end
         i = i + 1

@@ -13,7 +13,7 @@ primitive SR
 
 actor Main is TestList
   new create(env: Env) =>
-    None
+    PonyTest(env, this)
 
   fun tag tests(test: PonyTest) =>
     test(recover iso TestBufferInsert end)
@@ -26,12 +26,19 @@ actor Main is TestList
     test(recover iso TestBufferOutdent end)
     test(recover iso TestSyntaxHighlight end)
     test(recover iso TestLangDetect end)
+    test(recover iso TestRegexAnchorGlobal end)
+    test(recover iso TestRegexAnchorMatchesAtStart end)
+    test(recover iso TestRegexClassEscapeDigit end)
+    test(recover iso TestRegexClassEscapeWord end)
+    test(recover iso TestRegexClassEscapeSpace end)
+    test(recover iso TestRegexClassEscapeMixed end)
 
 
 class iso TestBufferInsert is UnitTest
   fun name(): String => "Buffer insert"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("hello"))
     buf.lines.push(SR("world"))
     h.assert_eq[USize](buf.line_count(), 2)
@@ -47,6 +54,7 @@ class iso TestBufferDeleteLine is UnitTest
   fun name(): String => "Buffer delete line"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("first"))
     buf.lines.push(SR("second"))
     buf.lines.push(SR("third"))
@@ -62,6 +70,7 @@ class iso TestBufferSplitLine is UnitTest
   fun name(): String => "Buffer split line"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("hello world"))
 
     buf.split_line(0, 5)
@@ -74,6 +83,7 @@ class iso TestBufferJoinLines is UnitTest
   fun name(): String => "Buffer join lines"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("hello"))
     buf.lines.push(SR(" world"))
 
@@ -86,29 +96,34 @@ class iso TestBufferDeleteRangeSame is UnitTest
   fun name(): String => "Buffer delete range same line"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("hello world"))
 
+    // Inclusive endpoints: cols 0..4 deletes "hello" (5 chars).
     buf.delete_range(0, 0, 0, 4)
-    h.assert_true(buf.line(0) == "o world")
+    h.assert_true(buf.line(0) == " world")
 
 
 class iso TestBufferDeleteRangeMulti is UnitTest
   fun name(): String => "Buffer delete range multi line"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("hello"))
     buf.lines.push(SR("middle"))
     buf.lines.push(SR("world"))
 
+    // Inclusive: delete from (0,3) through (2,2) — keeps "hel" + "ld".
     buf.delete_range(0, 3, 2, 2)
     h.assert_eq[USize](buf.line_count(), 1)
-    h.assert_true(buf.line(0) == "helrld")
+    h.assert_true(buf.line(0) == "helld")
 
 
 class iso TestBufferIndent is UnitTest
   fun name(): String => "Buffer indent"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("hello"))
     buf.lines.push(SR("world"))
 
@@ -121,6 +136,7 @@ class iso TestBufferOutdent is UnitTest
   fun name(): String => "Buffer outdent"
   fun apply(h: TestHelper) =>
     let buf = Buffer("")
+    buf.lines.clear()
     buf.lines.push(SR("  hello"))
     buf.lines.push(SR("  world"))
 
@@ -172,3 +188,59 @@ class iso TestLangDetect is UnitTest
     h.assert_true((SyntaxDetect("style.css") is LangCSS))
     h.assert_true((SyntaxDetect("Makefile") is LangMakefile))
     h.assert_true((SyntaxDetect("unknown.xyz") is LangNone))
+
+
+// ── Regex regression tests ──
+
+class iso TestRegexAnchorGlobal is UnitTest
+  fun name(): String => "^ anchor matches only at start, not at every pos"
+  fun apply(h: TestHelper) ? =>
+    // Bug: with global replace, ^a on "aa" matched at pos 0 and again at
+    // pos 1, because find() ignored its start argument when _anchored.
+    let re = ReCompile("^a")?
+    let m1 = re.find("aa", 0)?
+    h.assert_eq[USize](0, m1._1)
+    h.assert_eq[USize](1, m1._2)
+    // Second iteration of :s/^a/b/g — must fail to match.
+    h.assert_error({() ? => re.find("aa", 1)? })
+
+class iso TestRegexAnchorMatchesAtStart is UnitTest
+  fun name(): String => "^ still matches the literal start of input"
+  fun apply(h: TestHelper) ? =>
+    let re = ReCompile("^foo")?
+    let m = re.find("foobar", 0)?
+    h.assert_eq[USize](0, m._1)
+    h.assert_eq[USize](3, m._2)
+
+class iso TestRegexClassEscapeDigit is UnitTest
+  fun name(): String => "[\\d] inside char class matches digits"
+  fun apply(h: TestHelper) ? =>
+    let re = ReCompile("[\\d]+")?
+    let m = re.find("abc123def", 0)?
+    h.assert_eq[USize](3, m._1)
+    h.assert_eq[USize](6, m._2)
+
+class iso TestRegexClassEscapeWord is UnitTest
+  fun name(): String => "[\\w] inside char class matches word chars"
+  fun apply(h: TestHelper) ? =>
+    let re = ReCompile("[\\w]+")?
+    let m = re.find("  hi_42  ", 0)?
+    h.assert_eq[USize](2, m._1)
+    h.assert_eq[USize](7, m._2)
+
+class iso TestRegexClassEscapeSpace is UnitTest
+  fun name(): String => "[\\s] inside char class matches whitespace"
+  fun apply(h: TestHelper) ? =>
+    let re = ReCompile("[\\s]+")?
+    let m = re.find("ab \tcd", 0)?
+    h.assert_eq[USize](2, m._1)
+    h.assert_eq[USize](4, m._2)
+
+class iso TestRegexClassEscapeMixed is UnitTest
+  fun name(): String => "[\\dA-F] mixes class escape with literal range"
+  fun apply(h: TestHelper) ? =>
+    // Hex digits: \d for 0-9, plus A-F.
+    let re = ReCompile("[\\dA-F]+")?
+    let m = re.find("xx2BcAd", 0)?
+    h.assert_eq[USize](2, m._1)
+    h.assert_eq[USize](4, m._2)  // matches "2B"
