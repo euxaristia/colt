@@ -109,6 +109,9 @@ class Editor
   var _lang: SyntaxLang = LangNone
   var _lang_name_str: String = "none"
   var _hl_bc_state: Array[Bool] ref = Array[Bool]  // per-row: in block comment?
+  // Bracketed paste: when true, insert_key inserts bytes literally and skips
+  // auto-pair, auto-skip, and Esc-exits-mode handling.
+  var _in_paste: Bool = false
 
   new create(env: Env, filename: String, quit_fn: {()} val) =>
     _env = env
@@ -1038,7 +1041,7 @@ class Editor
         try
           let nl = _buf.lines(_cy)?
           let i: String val = consume indent
-          nl.insert(0, i)
+          nl.insert_in_place(0, i)
         end
         _cx = indent_end
         _buf.dirty = true
@@ -2156,6 +2159,10 @@ class Editor
   // ── Key handling: Insert mode ──
 
   fun ref insert_key(ch: U8) =>
+    if _in_paste then
+      _paste_byte(ch)
+      return
+    end
     _dot_record(ch)
     match ch
     | 0x1B =>  // Escape
@@ -2193,6 +2200,18 @@ class Editor
       end
     end
 
+  fun ref _paste_byte(ch: U8) =>
+    """
+    Insert a single paste-content byte literally — no auto-pair, no
+    auto-skip, no Esc-exits-mode. Newlines and tabs in the paste payload
+    still produce real newlines/tabs.
+    """
+    match ch
+    | 0x0D | 0x0A => _insert_newline()
+    | 0x09 => _insert_char('\t')
+    | if (ch >= 0x20) and (ch < 0x7F) => _insert_char(ch)
+    end
+
   fun ref _auto_insert_pair(open: U8, close: U8) =>
     """Insert open+close pair and place cursor between them."""
     try
@@ -2201,7 +2220,7 @@ class Editor
       pair.push(open)
       pair.push(close)
       let p: String val = consume pair
-      l.insert(_cx.isize(), p)
+      l.insert_in_place(_cx.isize(), p)
       _buf.dirty = true
       _cx = _cx + 1
     end
@@ -2741,7 +2760,7 @@ class Editor
         try
           let idx = l.find(pat where offset = offset.isize())?
           l.delete(idx, pat.size())
-          l.insert(idx, rep)
+          l.insert_in_place(idx, rep)
           total_replaced = total_replaced + 1
           if global then
             offset = idx.usize() + rep.size()
@@ -3007,7 +3026,7 @@ class Editor
       try
         let rl = _buf.lines(_cy)?
         rl.delete(num_start.isize(), num_end - num_start)
-        rl.insert(num_start.isize(), new_str)
+        rl.insert_in_place(num_start.isize(), new_str)
         _buf.dirty = true
       end
 
@@ -3084,6 +3103,30 @@ class Editor
     _quitting
 
   fun ref is_quitting(): Bool => _quitting
+
+  // ── Bracketed paste ──
+  // Called by main.pony when the terminal sends \e[200~ / \e[201~. While
+  // _in_paste is true, insert_key inserts bytes literally — no auto-pair,
+  // no auto-skip, and Esc does not exit insert mode (the paste payload may
+  // legitimately contain control bytes).
+
+  fun ref begin_paste() =>
+    _in_paste = true
+
+  fun ref end_paste() =>
+    _in_paste = false
+
+  fun paste_active(): Bool => _in_paste
+
+  // ── Test accessors ──
+  // Read-only views of editor state, used by the test suite. Cheap getters,
+  // no side effects.
+
+  fun current_line(): String box => _buf.line(_cy)
+  fun cursor_x(): USize => _cx
+  fun cursor_y(): USize => _cy
+  fun mode_is_insert(): Bool => _mode is ModeInsert
+  fun mode_is_normal(): Bool => _mode is ModeNormal
 
   fun ref arrow_up() =>
     match _mode
