@@ -2581,7 +2581,9 @@ class Editor
       _set_message("noexpandtab")
     elseif (cmd.size() > 9) and (cmd.substring(0, 9) == "set tabstop") then
       try
-        _tab_stop = cmd.substring(9).usize()?
+        // Clamp to >=1 so downstream tab-width math (rx % _tab_stop)
+        // can't divide by zero.
+        _tab_stop = cmd.substring(9).usize()?.max(1)
         _set_message("tabstop=" + _tab_stop.string())
       else
         _set_message("Usage: :set tabstop=N")
@@ -3257,7 +3259,9 @@ class Editor
       elseif term_row > _rows then _rows
       else term_row end
     (let new_cy: USize, let new_cx: USize) = _term_to_buf(clamped_row, term_col)
-    if (new_cy == _cy) and (new_cx == _cx) and (not _mouse_dragging) then
+    // If the cursor cell hasn't changed, nothing to update — even
+    // mid-drag, since the selection endpoint is the cursor itself.
+    if (new_cy == _cy) and (new_cx == _cx) then
       return
     end
     if not _mouse_dragging
