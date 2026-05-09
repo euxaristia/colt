@@ -32,6 +32,9 @@ actor Main is TestList
     test(recover iso TestEditorPasteOpenParen end)
     test(recover iso TestEditorPasteParenWithText end)
     test(recover iso TestEditorTypingStillAutoPairs end)
+    test(recover iso TestEditorPasteCrLfNoDoubleNewline end)
+    test(recover iso TestEditorPasteUtf8 end)
+    test(recover iso TestEditorPasteDropsDel end)
 
 
 class iso TestBufferInsert is UnitTest
@@ -321,3 +324,54 @@ class iso TestEditorTypingStillAutoPairs is UnitTest
 
     h.assert_eq[String]("()", editor.current_line().clone())
     h.assert_eq[USize](1, editor.cursor_x())
+
+class iso TestEditorPasteCrLfNoDoubleNewline is UnitTest
+  fun name(): String => "Paste of \\r\\n produces a single newline, not two"
+  fun apply(h: TestHelper) =>
+    // Windows-style line endings: clipboard hands us \r\n. The paste path
+    // should drop the CR so we don't end up with a phantom blank line.
+    let editor = Editor(h.env, "", {() => None})
+    editor.key_press('i')
+
+    editor.begin_paste()
+    editor.key_press('a')
+    editor.key_press(0x0D)  // CR
+    editor.key_press(0x0A)  // LF
+    editor.key_press('b')
+    editor.end_paste()
+
+    h.assert_eq[USize](2, editor.line_count())
+    h.assert_eq[String]("a", editor.line_at(0).clone())
+    h.assert_eq[String]("b", editor.line_at(1).clone())
+
+class iso TestEditorPasteUtf8 is UnitTest
+  fun name(): String => "Paste of multi-byte UTF-8 keeps every byte"
+  fun apply(h: TestHelper) =>
+    // 'é' in UTF-8 is 0xC3 0xA9 — two bytes. The pre-fix code dropped any
+    // byte >= 0x7F so accents and emoji vanished silently.
+    let editor = Editor(h.env, "", {() => None})
+    editor.key_press('i')
+
+    editor.begin_paste()
+    editor.key_press(0xC3)
+    editor.key_press(0xA9)
+    editor.end_paste()
+
+    let cur: String = editor.current_line().clone()
+    h.assert_eq[USize](2, cur.size())
+    try h.assert_eq[U8](0xC3, cur(0)?) end
+    try h.assert_eq[U8](0xA9, cur(1)?) end
+
+class iso TestEditorPasteDropsDel is UnitTest
+  fun name(): String => "Paste of DEL (0x7F) inserts nothing"
+  fun apply(h: TestHelper) =>
+    let editor = Editor(h.env, "", {() => None})
+    editor.key_press('i')
+
+    editor.begin_paste()
+    editor.key_press('a')
+    editor.key_press(0x7F)
+    editor.key_press('b')
+    editor.end_paste()
+
+    h.assert_eq[String]("ab", editor.current_line().clone())

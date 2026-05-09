@@ -2191,8 +2191,10 @@ class Editor
         _insert_char('"')
       end
     | '\'' => _auto_insert_pair('\'', '\'')
-    | if (ch >= 0x20) and (ch < 0x7F) =>
-      // Auto-skip: if ch matches next char, skip over it
+    | if (ch >= 0x20) and (ch != 0x7F) =>
+      // Auto-skip: if ch matches next char, skip over it. Bytes >= 0x80
+      // pass through here too — they're UTF-8 continuation bytes for
+      // multi-byte characters and need to land in the buffer verbatim.
       if _auto_skip_char(ch) then
         _cx = _cx + 1
       else
@@ -2203,13 +2205,16 @@ class Editor
   fun ref _paste_byte(ch: U8) =>
     """
     Insert a single paste-content byte literally — no auto-pair, no
-    auto-skip, no Esc-exits-mode. Newlines and tabs in the paste payload
-    still produce real newlines/tabs.
+    auto-skip, no Esc-exits-mode. Tabs become tabs, LF becomes a real
+    newline; CR is dropped so a Windows-style \r\n payload doesn't
+    produce a double newline. Bytes >= 0x80 are kept verbatim so
+    multi-byte UTF-8 sequences pass through intact.
     """
     match ch
-    | 0x0D | 0x0A => _insert_newline()
+    | 0x0A => _insert_newline()
+    | 0x0D => None  // drop CR; \n in \r\n triggers the newline above
     | 0x09 => _insert_char('\t')
-    | if (ch >= 0x20) and (ch < 0x7F) => _insert_char(ch)
+    | if (ch >= 0x20) and (ch != 0x7F) => _insert_char(ch)
     end
 
   fun ref _auto_insert_pair(open: U8, close: U8) =>
@@ -3123,6 +3128,8 @@ class Editor
   // no side effects.
 
   fun current_line(): String box => _buf.line(_cy)
+  fun line_at(row: USize): String box => _buf.line(row)
+  fun line_count(): USize => _buf.line_count()
   fun cursor_x(): USize => _cx
   fun cursor_y(): USize => _cy
   fun mode_is_insert(): Bool => _mode is ModeInsert
