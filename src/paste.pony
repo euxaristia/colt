@@ -50,18 +50,22 @@ class PasteState
         // Match failed (or no match in progress). Emit any held bytes
         // as content/keys, then process this byte fresh.
         _flush_hold(out)
-        if ch == 0x1B then
-          _hold.push(ch)
-        else
-          let k: PasteEventKind =
-            if _in_paste then PasteEventContent else PasteEventKey end
-          out.push(PasteEvent(k, ch))
-        end
+        // After a failed match, don't re-hold ESC — a real paste
+        // marker starts fresh and the previous hold was already flushed.
+        let k: PasteEventKind =
+          if _in_paste then PasteEventContent else PasteEventKey end
+        out.push(PasteEvent(k, ch))
       end
       i = i + 1
     end
-    // We intentionally do NOT flush _hold here. Partial markers (like \e[)
-    // stay in _hold until the next feed() call completes or invalidates them.
+    // Flush a lone held byte (always 0x1B at position 0). Without this,
+    // a standalone ESC is silently swallowed until the next feed() call,
+    // making the first ESC press appear to do nothing (e.g. exiting
+    // VISUAL mode, or leaving Insert mode). Longer partial markers like
+    // \e[ are preserved for the next call as before.
+    if _hold.size() == 1 then
+      _flush_hold(out)
+    end
     out
 
   fun ref _flush_hold(out: Array[PasteEvent]) =>
