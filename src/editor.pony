@@ -1023,27 +1023,31 @@ class Editor
     _buf.insert_char(_cy, _cx, ch)
     _cx = _cx + 1
 
+  fun ref _auto_indent_str(): String =>
+    let l = _buf.line(_cy)
+    var indent_end: USize = 0
+    while indent_end < l.size() do
+      let ch = try l(indent_end)? else ' ' end
+      if (ch != ' ') and (ch != '\t') then break end
+      indent_end = indent_end + 1
+    end
+    if indent_end > 0 then
+      l.substring(0, indent_end.isize()).clone()
+    else
+      ""
+    end
+
   fun ref _insert_newline() =>
-    // Auto-indent: copy leading whitespace from current line
     if not _in_paste then
-      let l = _buf.line(_cy)
-      var indent_end: USize = 0
-      while indent_end < l.size() do
-        let ch = try l(indent_end)? else ' ' end
-        if (ch != ' ') and (ch != '\t') then break end
-        indent_end = indent_end + 1
-      end
-      if indent_end > 0 then
-        let indent = l.substring(0, indent_end.isize()).clone()
+      let indent = _auto_indent_str()
+      if indent.size() > 0 then
         _buf.split_line(_cy, _cx)
         _cy = _cy + 1
-        // Insert indent at start of new line
         try
           let nl = _buf.lines(_cy)?
-          let i: String val = consume indent
-          nl.insert_in_place(0, i)
+          nl.insert_in_place(0, indent)
         end
-        _cx = indent_end
+        _cx = indent.size()
         _buf.dirty = true
         return
       end
@@ -1076,14 +1080,16 @@ class Editor
     content
 
   fun ref _open_line_below() =>
-    _buf.insert_line(_cy + 1, "")
+    let indent = _auto_indent_str()
+    _buf.insert_line(_cy + 1, indent)
     _cy = _cy + 1
-    _cx = 0
+    _cx = indent.size()
     _mode = ModeInsert
 
   fun ref _open_line_above() =>
-    _buf.insert_line(_cy, "")
-    _cx = 0
+    let indent = _auto_indent_str()
+    _buf.insert_line(_cy, indent)
+    _cx = indent.size()
     _mode = ModeInsert
 
   fun ref _join_line() =>
