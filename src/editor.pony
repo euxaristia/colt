@@ -109,6 +109,9 @@ class Editor
   var _lang: SyntaxLang = LangNone
   var _lang_name_str: String = "none"
   var _hl_bc_state: Array[Bool] ref = Array[Bool]  // per-row: in block comment?
+  // Bracketed paste: when true, insert_key inserts bytes literally and skips
+  // auto-pair, auto-skip, and Esc-exits-mode handling.
+  var _in_paste: Bool = false
 
   new create(env: Env, filename: String, quit_fn: {()} val) =>
     _env = env
@@ -1020,27 +1023,31 @@ class Editor
     _buf.insert_char(_cy, _cx, ch)
     _cx = _cx + 1
 
+  fun ref _auto_indent_str(): String =>
+    let l = _buf.line(_cy)
+    var indent_end: USize = 0
+    while indent_end < l.size() do
+      let ch = try l(indent_end)? else ' ' end
+      if (ch != ' ') and (ch != '\t') then break end
+      indent_end = indent_end + 1
+    end
+    if indent_end > 0 then
+      l.substring(0, indent_end.isize()).clone()
+    else
+      ""
+    end
+
   fun ref _insert_newline() =>
-    // Auto-indent: copy leading whitespace from current line
-    if _mode is ModeInsert then
-      let l = _buf.line(_cy)
-      var indent_end: USize = 0
-      while indent_end < l.size() do
-        let ch = try l(indent_end)? else ' ' end
-        if (ch != ' ') and (ch != '\t') then break end
-        indent_end = indent_end + 1
-      end
-      if indent_end > 0 then
-        let indent = l.substring(0, indent_end.isize()).clone()
+    if not _in_paste then
+      let indent = _auto_indent_str()
+      if indent.size() > 0 then
         _buf.split_line(_cy, _cx)
         _cy = _cy + 1
-        // Insert indent at start of new line
         try
           let nl = _buf.lines(_cy)?
-          let i: String val = consume indent
-          nl.insert(0, i)
+          nl.insert_in_place(0, indent)
         end
-        _cx = indent_end
+        _cx = indent.size()
         _buf.dirty = true
         return
       end
@@ -1073,14 +1080,16 @@ class Editor
     content
 
   fun ref _open_line_below() =>
-    _buf.insert_line(_cy + 1, "")
+    let indent = _auto_indent_str()
+    _buf.insert_line(_cy + 1, indent)
     _cy = _cy + 1
-    _cx = 0
+    _cx = indent.size()
     _mode = ModeInsert
 
   fun ref _open_line_above() =>
-    _buf.insert_line(_cy, "")
-    _cx = 0
+    let indent = _auto_indent_str()
+    _buf.insert_line(_cy, indent)
+    _cx = indent.size()
     _mode = ModeInsert
 
   fun ref _join_line() =>
@@ -2156,6 +2165,10 @@ class Editor
   // ── Key handling: Insert mode ──
 
   fun ref insert_key(ch: U8) =>
+    if _in_paste then
+      _paste_byte(ch)
+      return
+    end
     _dot_record(ch)
     match ch
     | 0x1B =>  // Escape
@@ -2184,13 +2197,30 @@ class Editor
         _insert_char('"')
       end
     | '\'' => _auto_insert_pair('\'', '\'')
-    | if (ch >= 0x20) and (ch < 0x7F) =>
-      // Auto-skip: if ch matches next char, skip over it
+    | if (ch >= 0x20) and (ch != 0x7F) =>
+      // Auto-skip: if ch matches next char, skip over it. Bytes >= 0x80
+      // pass through here too — they're UTF-8 continuation bytes for
+      // multi-byte characters and need to land in the buffer verbatim.
       if _auto_skip_char(ch) then
         _cx = _cx + 1
       else
         _insert_char(ch)
       end
+    end
+
+  fun ref _paste_byte(ch: U8) =>
+    """
+    Insert a single paste-content byte literally — no auto-pair, no
+    auto-skip, no Esc-exits-mode. Tabs become tabs, LF becomes a real
+    newline; CR is dropped so a Windows-style \r\n payload doesn't
+    produce a double newline. Bytes >= 0x80 are kept verbatim so
+    multi-byte UTF-8 sequences pass through intact.
+    """
+    match ch
+    | 0x0A => _insert_newline()
+    | 0x0D => None  // drop CR; \n in \r\n triggers the newline above
+    | 0x09 => _insert_char('\t')
+    | if (ch >= 0x20) and (ch != 0x7F) => _insert_char(ch)
     end
 
   fun ref _auto_insert_pair(open: U8, close: U8) =>
@@ -2201,7 +2231,7 @@ class Editor
       pair.push(open)
       pair.push(close)
       let p: String val = consume pair
-      l.insert(_cx.isize(), p)
+      l.insert_in_place(_cx.isize(), p)
       _buf.dirty = true
       _cx = _cx + 1
     end
@@ -2741,7 +2771,7 @@ class Editor
         try
           let idx = l.find(pat where offset = offset.isize())?
           l.delete(idx, pat.size())
-          l.insert(idx, rep)
+          l.insert_in_place(idx, rep)
           total_replaced = total_replaced + 1
           if global then
             offset = idx.usize() + rep.size()
@@ -3007,7 +3037,7 @@ class Editor
       try
         let rl = _buf.lines(_cy)?
         rl.delete(num_start.isize(), num_end - num_start)
-        rl.insert(num_start.isize(), new_str)
+        rl.insert_in_place(num_start.isize(), new_str)
         _buf.dirty = true
       end
 
@@ -3084,6 +3114,32 @@ class Editor
     _quitting
 
   fun ref is_quitting(): Bool => _quitting
+
+  // ── Bracketed paste ──
+  // Called by main.pony when the terminal sends \e[200~ / \e[201~. While
+  // _in_paste is true, insert_key inserts bytes literally — no auto-pair,
+  // no auto-skip, and Esc does not exit insert mode (the paste payload may
+  // legitimately contain control bytes).
+
+  fun ref begin_paste() =>
+    _in_paste = true
+
+  fun ref end_paste() =>
+    _in_paste = false
+
+  fun paste_active(): Bool => _in_paste
+
+  // ── Test accessors ──
+  // Read-only views of editor state, used by the test suite. Cheap getters,
+  // no side effects.
+
+  fun current_line(): String box => _buf.line(_cy)
+  fun line_at(row: USize): String box => _buf.line(row)
+  fun line_count(): USize => _buf.line_count()
+  fun cursor_x(): USize => _cx
+  fun cursor_y(): USize => _cy
+  fun mode_is_insert(): Bool => _mode is ModeInsert
+  fun mode_is_normal(): Bool => _mode is ModeNormal
 
   fun ref arrow_up() =>
     match _mode
