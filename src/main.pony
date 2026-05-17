@@ -173,9 +173,11 @@ actor TimerRender
     _editor.render()
 
   be paste_byte(b: U8) =>
-    // Insert without rendering — renders fire on end_paste so a 10kB paste
-    // doesn't trigger 10k repaints.
-    _editor.key_press(b)
+    // Insert without rendering — renders fire on end_paste. Use insert_key
+    // directly so paste content bypasses mode dispatch — paste should
+    // insert literally regardless of whether the editor is in insert mode
+    // or normal mode.
+    _editor.insert_key(b)
 
 
 class EditorNotify is ANSINotify
