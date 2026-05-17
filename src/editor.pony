@@ -1025,7 +1025,7 @@ class Editor
 
   fun ref _insert_newline() =>
     // Auto-indent: copy leading whitespace from current line
-    if _mode is ModeInsert then
+    if (_mode is ModeInsert) and (not _in_paste) then
       let l = _buf.line(_cy)
       var indent_end: USize = 0
       while indent_end < l.size() do
