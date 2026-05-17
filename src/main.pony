@@ -29,9 +29,11 @@ actor Main
       @write(1, alt_screen.cpointer(), alt_screen.size())
     end
 
-    // Enable SGR mouse mode (scroll wheel + click tracking)
+    // Enable SGR mouse mode. ?1002 = button-event tracking: reports presses,
+    // releases, and motion *while a button is held* — which is what we need
+    // for click-to-move-cursor and drag-select. ?1006 = SGR coordinate format.
     ifdef posix then
-      let mouse_on = "\x1B[?1000h\x1B[?1006h"
+      let mouse_on = "\x1B[?1002h\x1B[?1006h"
       @write(1, mouse_on.cpointer(), mouse_on.size())
     end
 
@@ -66,7 +68,7 @@ actor Main
       @write(1, paste_off.cpointer(), paste_off.size())
     end
     ifdef posix then
-      let mouse_off = "\x1B[?1006l\x1B[?1000l"
+      let mouse_off = "\x1B[?1006l\x1B[?1002l"
       @write(1, mouse_off.cpointer(), mouse_off.size())
     end
     ifdef posix then
@@ -146,6 +148,18 @@ actor TimerRender
 
   be scroll_down() =>
     _editor.scroll_down()
+    _editor.render()
+
+  be mouse_press(row: USize, col: USize) =>
+    _editor.mouse_press(row, col)
+    _editor.render()
+
+  be mouse_drag(row: USize, col: USize) =>
+    _editor.mouse_drag(row, col)
+    _editor.render()
+
+  be mouse_release(row: USize, col: USize) =>
+    _editor.mouse_release(row, col)
     _editor.render()
 
   be set_size(rows: USize, cols: USize) =>
@@ -278,6 +292,7 @@ class MouseInputNotify is InputNotify
 
   fun ref _parse_mouse() =>
     if _mouse_buf.size() < 4 then return end
+    let term_ch: U8 = try _mouse_buf(_mouse_buf.size() - 1)? else 'M' end
     let params_iso = _mouse_buf.substring(0, (_mouse_buf.size() - 1).isize())
     let params: String val = consume params_iso
     var parts = Array[String val](3)
@@ -299,10 +314,23 @@ class MouseInputNotify is InputNotify
     if parts.size() < 3 then return end
     try
       let button = parts(0)?.usize()?
+      let col = parts(1)?.usize()?
+      let row = parts(2)?.usize()?
+      // SGR 1006 codes: 0=left, 1=middle, 2=right; +32 = motion-while-held;
+      // 64/65 = scroll up/down. Terminator 'M' = press/motion, 'm' = release.
       if button == 64 then
         _e.scroll_up()
       elseif button == 65 then
         _e.scroll_down()
+      elseif button == 0 then
+        if term_ch == 'M' then
+          _e.mouse_press(row, col)
+        else
+          _e.mouse_release(row, col)
+        end
+      elseif button == 32 then
+        // Motion with left button held — drag.
+        _e.mouse_drag(row, col)
       end
     end
 

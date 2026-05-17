@@ -16,12 +16,12 @@ class PasteEvent
 class PasteState
   """
   Stream-mode tracker for DEC bracketed paste (xterm "?2004h").
-  Feed input bytes via `feed`; it returns a list of events in order:
+  Feed input bytes via \`feed\`; it returns a list of events in order:
     - PasteEventStart  : the \e[200~ marker was just consumed
     - PasteEventEnd    : the \e[201~ marker was just consumed
     - PasteEventKey    : a regular keystroke byte (forward to terminal parser)
     - PasteEventContent: a paste-body byte (insert literally, bypass auto-pair)
-  Partial markers split across `feed` calls are held until resolved.
+  Partial markers split across \`feed\` calls are held until resolved.
   """
   var _in_paste: Bool = false
   embed _hold: Array[U8] = Array[U8]
@@ -50,21 +50,22 @@ class PasteState
         // Match failed (or no match in progress). Emit any held bytes
         // as content/keys, then process this byte fresh.
         _flush_hold(out)
-        if ch == 0x1B then
-          _hold.push(ch)
-        else
-          let k: PasteEventKind =
-            if _in_paste then PasteEventContent else PasteEventKey end
-          out.push(PasteEvent(k, ch))
-        end
+        // After a failed match, don't re-hold ESC — a real paste
+        // marker starts fresh and the previous hold was already flushed.
+        let k: PasteEventKind =
+          if _in_paste then PasteEventContent else PasteEventKey end
+        out.push(PasteEvent(k, ch))
       end
       i = i + 1
     end
-    // End of feed: release any partial-marker hold. Real terminals deliver
-    // \e[200~ markers as part of a single read alongside the paste body, so
-    // a leftover hold here is almost certainly a typed ESC or arrow-key
-    // prefix that we'd otherwise swallow until the next keystroke.
-    _flush_hold(out)
+    // Flush a lone held byte (always 0x1B at position 0). Without this,
+    // a standalone ESC is silently swallowed until the next feed() call,
+    // making the first ESC press appear to do nothing (e.g. exiting
+    // VISUAL mode, or leaving Insert mode). Longer partial markers like
+    // \e[ are preserved for the next call as before.
+    if _hold.size() == 1 then
+      _flush_hold(out)
+    end
     out
 
   fun ref _flush_hold(out: Array[PasteEvent]) =>
@@ -78,7 +79,7 @@ class PasteState
 
   fun _expected_at(idx: USize): U8 =>
     """
-    Expected byte at `idx` in the marker we're matching.
+    Expected byte at \`idx\` in the marker we're matching.
     """
     let target_5: U8 = if _in_paste then '1' else '0' end
     match idx

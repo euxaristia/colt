@@ -100,6 +100,11 @@ class Editor
   // Visual selection
   var _sel_sx: USize = 0
   var _sel_sy: USize = 0
+  // Mouse drag-select state. Anchor is set on press; drag enters Visual.
+  var _mouse_anchor_x: USize = 0
+  var _mouse_anchor_y: USize = 0
+  var _mouse_pressed: Bool = false
+  var _mouse_dragging: Bool = false
   // Dot repeat
   var _dot_keys: Array[U8] ref = Array[U8]
   var _dot_recording: Array[U8] ref = Array[U8]
@@ -238,6 +243,23 @@ class Editor
       end
     end
     rx
+
+  // Inverse of _cx_to_rx. A click inside a tab's cells lands on the tab.
+  fun _rx_to_cx(row: USize, rx_target: USize): USize =>
+    var rx: USize = 0
+    var cx: USize = 0
+    try
+      let l = _buf.line(row)
+      while cx < l.size() do
+        let w =
+          if l(cx)? == '\t' then _tab_stop - (rx % _tab_stop)
+          else USize(1) end
+        if (rx + w) > rx_target then break end
+        rx = rx + w
+        cx = cx + 1
+      end
+    end
+    cx
 
   // ── Helpers ──
 
@@ -1023,27 +1045,31 @@ class Editor
     _buf.insert_char(_cy, _cx, ch)
     _cx = _cx + 1
 
+  fun ref _auto_indent_str(): String =>
+    let l = _buf.line(_cy)
+    var indent_end: USize = 0
+    while indent_end < l.size() do
+      let ch = try l(indent_end)? else ' ' end
+      if (ch != ' ') and (ch != '\t') then break end
+      indent_end = indent_end + 1
+    end
+    if indent_end > 0 then
+      l.substring(0, indent_end.isize()).clone()
+    else
+      ""
+    end
+
   fun ref _insert_newline() =>
-    // Auto-indent: copy leading whitespace from current line
-    if (_mode is ModeInsert) and (not _in_paste) then
-      let l = _buf.line(_cy)
-      var indent_end: USize = 0
-      while indent_end < l.size() do
-        let ch = try l(indent_end)? else ' ' end
-        if (ch != ' ') and (ch != '\t') then break end
-        indent_end = indent_end + 1
-      end
-      if indent_end > 0 then
-        let indent = l.substring(0, indent_end.isize()).clone()
+    if not _in_paste then
+      let indent = _auto_indent_str()
+      if indent.size() > 0 then
         _buf.split_line(_cy, _cx)
         _cy = _cy + 1
-        // Insert indent at start of new line
         try
           let nl = _buf.lines(_cy)?
-          let i: String val = consume indent
-          nl.insert_in_place(0, i)
+          nl.insert_in_place(0, indent)
         end
-        _cx = indent_end
+        _cx = indent.size()
         _buf.dirty = true
         return
       end
@@ -1076,14 +1102,16 @@ class Editor
     content
 
   fun ref _open_line_below() =>
-    _buf.insert_line(_cy + 1, "")
+    let indent = _auto_indent_str()
+    _buf.insert_line(_cy + 1, indent)
     _cy = _cy + 1
-    _cx = 0
+    _cx = indent.size()
     _mode = ModeInsert
 
   fun ref _open_line_above() =>
-    _buf.insert_line(_cy, "")
-    _cx = 0
+    let indent = _auto_indent_str()
+    _buf.insert_line(_cy, indent)
+    _cx = indent.size()
     _mode = ModeInsert
 
   fun ref _join_line() =>
@@ -2583,7 +2611,9 @@ class Editor
       _set_message("noexpandtab")
     elseif (cmd.size() > 9) and (cmd.substring(0, 9) == "set tabstop") then
       try
-        _tab_stop = cmd.substring(9).usize()?
+        // Clamp to >=1 so downstream tab-width math (rx % _tab_stop)
+        // can't divide by zero.
+        _tab_stop = cmd.substring(9).usize()?.max(1)
         _set_message("tabstop=" + _tab_stop.string())
       else
         _set_message("Usage: :set tabstop=N")
@@ -2656,7 +2686,7 @@ class Editor
     """
     Parse and execute substitute command.
     Supports: :s/pat/rep/, :s/pat/rep/g, :%s/pat/rep/g, :.,$s/pat/rep/g
-    Uses literal string matching (no regex).
+    Uses regex patterns (see regex.pony for supported syntax).
     """
     // Find the 's/' to get the range prefix
     var s_pos: USize = 0
@@ -2753,23 +2783,39 @@ class Editor
       f_pos = f_pos + 1
     end
 
+    // Compile regex
+    if pat.size() == 0 then
+      _set_message("Empty pattern")
+      return
+    end
+    let re = try
+      ReCompile(pat)?
+    else
+      _set_message("Invalid regex")
+      return
+    end
+
     // Execute substitution
     var total_replaced: USize = 0
     var r = start_line
     while r <= end_line.min(_buf.line_count() - 1) do
       let l = try _buf.lines(r)? else r = r + 1; continue end
-      if pat.size() == 0 then r = r + 1; continue end
 
       var offset: USize = 0
       while true do
         try
-          let idx = l.find(pat where offset = offset.isize())?
-          l.delete(idx, pat.size())
-          l.insert_in_place(idx, rep)
+          (let m_start, let m_end) = re.find(l, offset)?
+          let match_iso = l.substring(m_start.isize(), m_end.isize())
+          let matched: String val = consume match_iso
+          let expanded: String val = ReReplace(rep, matched)
+          l.delete(m_start.isize(), m_end - m_start)
+          l.insert(m_start.isize(), expanded)
           total_replaced = total_replaced + 1
           if global then
-            offset = idx.usize() + rep.size()
-            if offset >= l.size() then break end
+            // Advance past the replacement; if match was zero-width, step by 1
+            offset = m_start + expanded.size()
+            if (m_end == m_start) then offset = offset + 1 end
+            if offset > l.size() then break end
           else
             break
           end
@@ -3228,6 +3274,88 @@ class Editor
       _cy = (_row_off + so).min(_buf.line_count() - 1)
       _clamp_cursor()
     end
+
+  // ── Mouse click / drag-select ──
+
+  // Map a 1-indexed terminal cell to (file_row, cx). Gutter clicks snap to
+  // col 0; clicks past EOF snap to the last line. Caller filters status-bar.
+  fun _term_to_buf(term_row: USize, term_col: USize): (USize, USize) =>
+    let lc = _buf.line_count()
+    let r0 = if term_row > 0 then term_row - 1 else 0 end
+    let file_row = (r0 + _row_off).min(if lc > 0 then lc - 1 else 0 end)
+    let gc = _gutter_cols()
+    let cx =
+      if term_col == 0 then USize(0)
+      elseif (term_col - 1) < gc then USize(0)
+      else
+        let rx_target = ((term_col - 1) - gc) + _col_off
+        _rx_to_cx(file_row, rx_target)
+      end
+    (file_row, cx)
+
+  fun ref mouse_press(term_row: USize, term_col: USize) =>
+    if (term_row == 0) or (term_row > _rows) then return end
+    if _buf.line_count() == 0 then return end
+    match _mode
+    | ModeCommand => return
+    | ModeSearch => return
+    | ModeHelp => return
+    end
+    (let new_cy: USize, let new_cx: USize) = _term_to_buf(term_row, term_col)
+    // A click in Visual mode cancels the existing selection (matches `set
+    // mouse=a` in vim — the click rearms; only a drag re-enters Visual).
+    match _mode
+    | ModeVisual => _mode = ModeNormal
+    | ModeVisualLine => _mode = ModeNormal
+    end
+    _cy = new_cy
+    _cx = new_cx
+    _clamp_cursor()
+    _mouse_anchor_x = _cx
+    _mouse_anchor_y = _cy
+    _mouse_pressed = true
+    _mouse_dragging = false
+
+  fun ref mouse_drag(term_row: USize, term_col: USize) =>
+    if not _mouse_pressed then return end
+    if _buf.line_count() == 0 then return end
+    match _mode
+    | ModeCommand => return
+    | ModeSearch => return
+    | ModeHelp => return
+    end
+    // Clamp drag row to the text area so dragging into the status bar still
+    // extends selection toward the last visible line instead of stalling.
+    let clamped_row =
+      if term_row == 0 then USize(1)
+      elseif term_row > _rows then _rows
+      else term_row end
+    (let new_cy: USize, let new_cx: USize) = _term_to_buf(clamped_row, term_col)
+    // If the cursor cell hasn't changed, nothing to update — even
+    // mid-drag, since the selection endpoint is the cursor itself.
+    if (new_cy == _cy) and (new_cx == _cx) then
+      return
+    end
+    if not _mouse_dragging
+      and ((new_cy != _mouse_anchor_y) or (new_cx != _mouse_anchor_x))
+    then
+      // Insert mode: move cursor without entering Visual — drag-select from
+      // inside Insert isn't a meaningful vi mode transition.
+      match _mode
+      | ModeNormal =>
+        _mode = ModeVisual
+        _sel_sx = _mouse_anchor_x
+        _sel_sy = _mouse_anchor_y
+      end
+      _mouse_dragging = true
+    end
+    _cy = new_cy
+    _cx = new_cx
+    _clamp_cursor()
+
+  fun ref mouse_release(term_row: USize, term_col: USize) =>
+    _mouse_pressed = false
+    _mouse_dragging = false
 
   // ── Rendering ──
 
