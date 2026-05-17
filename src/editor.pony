@@ -3716,20 +3716,40 @@ class Editor
     right.append((_cx + 1).string())
     right.append(" ")
 
-    let padding = if _cols > (left.size() + right.size()) then
-      _cols - left.size() - right.size()
+    // Fit `left` + padding + `right` into exactly `_cols` cells. If the two
+    // sides together exceed `_cols`, drop the right side first, then truncate
+    // left. Overflowing past `_cols` would wrap to a second terminal row,
+    // which scrolls the screen and shifts the cursor off the target line.
+    let l_sz = left.size()
+    let r_sz = right.size()
+    if (l_sz + r_sz) <= _cols then
+      out.append(left)
+      _pad(out, _cols - l_sz - r_sz)
+      out.append(right)
+    elseif l_sz <= _cols then
+      out.append(left)
+      _pad(out, _cols - l_sz)
     else
-      0
+      // _cols < l_sz: truncate left at a UTF-8 codepoint boundary. Cutting
+      // mid-codepoint emits invalid bytes, which terminals render as
+      // replacement glyphs or, worse, garble the next line.
+      var limit = _cols
+      try
+        while (limit > 0) and ((left(limit)? and 0xC0) == 0x80) do
+          limit = limit - 1
+        end
+      end
+      out.append(left.substring(0, limit.isize()))
+      _pad(out, _cols - limit)
     end
+    out.append("\x1B[m")
 
-    out.append(left)
+  fun _pad(out: String ref, count: USize) =>
     var p: USize = 0
-    while p < padding do
+    while p < count do
       out.push(' ')
       p = p + 1
     end
-    out.append(right)
-    out.append("\x1B[m")
 
   fun _draw_command_line(out: String ref) =>
     match _mode
