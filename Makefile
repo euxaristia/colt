@@ -1,5 +1,5 @@
 CC = cc
-SOURCES = src/main.pony src/editor.pony src/buffer.pony src/syntax.pony src/paste.pony
+SOURCES = src/main.pony src/editor.pony src/buffer.pony src/syntax.pony src/regex.pony src/paste.pony
 TARGET = colt
 # tests/{buffer,syntax,editor,paste}.pony are symlinks to ../src/ so the
 # test binary links against the same code as the editor.
