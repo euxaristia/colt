@@ -35,6 +35,13 @@ actor Main
       @write(1, mouse_on.cpointer(), mouse_on.size())
     end
 
+    // Enable bracketed-paste mode (?2004). The terminal wraps pasted text in
+    // \e[200~ ... \e[201~ markers so we can suppress auto-pair on paste.
+    ifdef posix then
+      let paste_on = "\x1B[?2004h"
+      @write(1, paste_on.cpointer(), paste_on.size())
+    end
+
     let filename: String val = try env.args(1)? else "" end
 
     let main_tag: Main tag = this
@@ -53,7 +60,11 @@ actor Main
     // Initial render (TimerRender.create renders immediately)
 
   be quit() =>
-    // Disable mouse mode
+    // Disable bracketed paste and mouse modes
+    ifdef posix then
+      let paste_off = "\x1B[?2004l"
+      @write(1, paste_off.cpointer(), paste_off.size())
+    end
     ifdef posix then
       let mouse_off = "\x1B[?1006l\x1B[?1000l"
       @write(1, mouse_off.cpointer(), mouse_off.size())
@@ -140,6 +151,18 @@ actor TimerRender
   be set_size(rows: USize, cols: USize) =>
     _editor.set_size(rows, cols)
 
+  be begin_paste() =>
+    _editor.begin_paste()
+
+  be end_paste() =>
+    _editor.end_paste()
+    _editor.render()
+
+  be paste_byte(b: U8) =>
+    // Insert without rendering — renders fire on end_paste so a 10kB paste
+    // doesn't trigger 10k repaints.
+    _editor.key_press(b)
+
 
 class EditorNotify is ANSINotify
   let _editor: TimerRender tag
@@ -185,23 +208,27 @@ class EditorNotify is ANSINotify
 
 class MouseInputNotify is InputNotify
   """
-  Intercepts mouse escape sequences for scroll wheel support.
-  Non-mouse input is forwarded to ANSITerm for normal key handling.
+  Intercepts mouse escape sequences for scroll wheel support and routes
+  bracketed-paste markers (\e[200~ / \e[201~) so paste content bypasses
+  auto-pair. Non-mouse / non-paste-marker input is forwarded to ANSITerm
+  for normal key handling.
   """
   let _t: ANSITerm tag
   let _e: TimerRender tag
   var _in_mouse: Bool = false
   embed _mouse_buf: String ref = String
+  let _paste: PasteState ref = PasteState
 
   new create(t: ANSITerm tag, e: TimerRender tag) =>
     _t = t
     _e = e
 
   fun ref apply(data: Array[U8] iso) =>
-    let non_mouse = recover iso Array[U8] end
+    let non_paste = recover iso Array[U8] end
     var i: USize = 0
     let d: Array[U8] ref = consume ref data
 
+    // Pass 1: strip mouse sequences (their bytes never look like paste markers).
     while i < d.size() do
       if _in_mouse then
         let ch = try d(i)? else i = i + 1; continue end
@@ -217,13 +244,26 @@ class MouseInputNotify is InputNotify
         _mouse_buf.clear()
         i = i + 3
       else
-        try non_mouse.push(d(i)?) end
+        try non_paste.push(d(i)?) end
         i = i + 1
       end
     end
 
-    if non_mouse.size() > 0 then
-      _t(consume non_mouse)
+    // Pass 2: feed remaining bytes through the bracketed-paste tracker.
+    if non_paste.size() == 0 then return end
+    let bytes: Array[U8] val = consume non_paste
+    let events = _paste.feed(bytes)
+    let key_bytes = recover iso Array[U8] end
+    for ev in events.values() do
+      match ev.kind
+      | PasteEventStart => _e.begin_paste()
+      | PasteEventEnd => _e.end_paste()
+      | PasteEventKey => key_bytes.push(ev.byte)
+      | PasteEventContent => _e.paste_byte(ev.byte)
+      end
+    end
+    if key_bytes.size() > 0 then
+      _t(consume key_bytes)
     end
 
   fun _check_mouse_start(d: Array[U8] ref, i: USize): Bool =>

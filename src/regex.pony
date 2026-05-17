@@ -89,8 +89,11 @@ class val Regex
     false
 
 primitive ReCompile
+  fun _empty_ranges(): Array[(U8, U8)] val =>
+    recover val Array[(U8, U8)] end
+
   fun apply(pattern: String box): Regex ? =>
-    let atoms = recover trn Array[_ReAtom] end
+    let atoms = recover trn Array[_ReAtom](pattern.size()) end
     let n = pattern.size()
     var i: USize = 0
     var anchored = false
@@ -103,7 +106,7 @@ primitive ReCompile
 
       // End anchor only recognized as the last character
       if (c == '$') and (i == (n - 1)) then
-        let empty = recover val Array[(U8, U8)] end
+        let empty = _empty_ranges()
         atoms.push(_ReAtom(5, 0, empty, 1, 1))
         i = i + 1
         break
@@ -111,7 +114,7 @@ primitive ReCompile
 
       var kind: U8 = 0
       var b: U8 = 0
-      var rs: Array[(U8, U8)] val = recover val Array[(U8, U8)] end
+      var rs: Array[(U8, U8)] val = _empty_ranges()
 
       if c == '.' then
         kind = 1
@@ -280,7 +283,7 @@ primitive ReReplace
   fun apply(replacement: String val, matched: String val): String iso^ =>
     """Expand & (whole match) and escape sequences in replacement text."""
     recover iso
-      let out = String
+      let out = String(replacement.size())
       var i: USize = 0
       let n = replacement.size()
       while i < n do

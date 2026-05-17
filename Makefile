@@ -1,7 +1,10 @@
 CC = cc
-SOURCES = src/main.pony src/editor.pony src/buffer.pony src/syntax.pony src/regex.pony
+SOURCES = src/main.pony src/editor.pony src/buffer.pony src/syntax.pony src/regex.pony src/paste.pony
 TARGET = colt
-TEST_SOURCES = tests/tests.pony tests/buffer.pony tests/syntax.pony
+# tests/{buffer,syntax,editor,paste}.pony are symlinks to ../src/ so the
+# test binary links against the same code as the editor.
+TEST_SOURCES = tests/tests.pony tests/buffer.pony tests/syntax.pony \
+  tests/editor.pony tests/paste.pony
 TEST_TARGET = colt-tests
 
 .PHONY: all clean install run test
